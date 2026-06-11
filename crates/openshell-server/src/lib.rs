@@ -240,6 +240,9 @@ pub(crate) async fn run_server(
     if database_url.is_empty() {
         return Err(Error::config("database_url is required"));
     }
+    config
+        .validate_gateway_auth_posture()
+        .map_err(Error::config)?;
 
     let middleware_registrations = config_file
         .as_ref()
@@ -263,24 +266,6 @@ pub(crate) async fn run_server(
 
     let store = Arc::new(Store::connect(database_url).await?);
 
-    let oidc_cache = if let Some(ref oidc) = config.oidc {
-        // Validate RBAC configuration before starting.
-        let policy = auth::authz::AuthzPolicy {
-            admin_role: oidc.admin_role.clone(),
-            user_role: oidc.user_role.clone(),
-            scopes_enabled: !oidc.scopes_claim.is_empty(),
-        };
-        policy.validate().map_err(Error::config)?;
-
-        let cache = auth::oidc::JwksCache::new(oidc)
-            .await
-            .map_err(|e| Error::config(format!("OIDC initialization failed: {e}")))?;
-        info!("OIDC JWT validation enabled (issuer: {})", oidc.issuer);
-        Some(Arc::new(cache))
-    } else {
-        None
-    };
-
     let sandbox_index = SandboxIndex::new();
     let sandbox_watch_bus = SandboxWatchBus::new();
     let supervisor_sessions = Arc::new(supervisor_session::SupervisorSessionRegistry::new());
@@ -301,6 +286,29 @@ pub(crate) async fn run_server(
         supervisor_sessions.clone(),
     )
     .await?;
+    config
+        .validate_gateway_auth_posture_with_extra_bind_addresses(compute.gateway_bind_addresses())
+        .map_err(Error::config)?;
+
+    let oidc_cache = if let Some(ref oidc) = config.oidc {
+        // Validate RBAC configuration before starting.
+        let policy = auth::authz::AuthzPolicy {
+            admin_role: oidc.admin_role.clone(),
+            user_role: oidc.user_role.clone(),
+            scopes_enabled: !oidc.scopes_claim.is_empty(),
+        };
+        policy.validate().map_err(Error::config)?;
+
+        let cache = auth::oidc::JwksCache::new(oidc)
+            .await
+            .map_err(|e| Error::config(format!("OIDC initialization failed: {e}")))?;
+        info!("OIDC JWT validation enabled (issuer: {})", oidc.issuer);
+        warn_if_oidc_auth_only_enabled(&config);
+        Some(Arc::new(cache))
+    } else {
+        None
+    };
+
     let gateway_interceptors =
         openshell_gateway_interceptors::initialize(config.gateway_interceptors.clone())
             .await
@@ -942,6 +950,22 @@ fn builtin_compute_driver(name: &str) -> Option<ComputeDriverKind> {
     name.parse().ok()
 }
 
+fn oidc_auth_only_enabled(config: &Config) -> bool {
+    config.auth.allow_oidc_auth_only
+        && config
+            .oidc
+            .as_ref()
+            .is_some_and(|oidc| oidc.admin_role.is_empty() && oidc.user_role.is_empty())
+}
+
+fn warn_if_oidc_auth_only_enabled(config: &Config) {
+    if oidc_auth_only_enabled(config) {
+        warn!(
+            "OIDC authentication-only mode enabled; RBAC role checks are disabled and configured scope checks still apply"
+        );
+    }
+}
+
 fn kubernetes_sandbox_jwt_expiry_disabled(config: &Config) -> bool {
     config
         .gateway_jwt
@@ -1022,7 +1046,7 @@ mod tests {
         ConfiguredComputeDriver, ConnectionProtocol, MultiplexService, ServerState, TlsAcceptor,
         allow_plaintext_service_http, classify_initial_bytes, configured_compute_driver,
         gateway_listener_addresses, is_benign_tls_handshake_failure,
-        kubernetes_sandbox_jwt_expiry_disabled, serve_gateway_listener,
+        kubernetes_sandbox_jwt_expiry_disabled, oidc_auth_only_enabled, serve_gateway_listener,
     };
     use openshell_core::{
         ComputeDriverKind, Config,
@@ -1490,6 +1514,29 @@ mod tests {
             &config_with_jwt_ttl(3600)
         ));
         assert!(!kubernetes_sandbox_jwt_expiry_disabled(&Config::new(None)));
+    }
+
+    #[test]
+    fn oidc_auth_only_enabled_requires_explicit_active_mode() {
+        let mut config = Config::new(None).with_oidc(openshell_core::OidcConfig {
+            issuer: "https://issuer.example.com".to_string(),
+            audience: "openshell-cli".to_string(),
+            jwks_ttl_secs: 3600,
+            roles_claim: "realm_access.roles".to_string(),
+            admin_role: String::new(),
+            user_role: String::new(),
+            scopes_claim: String::new(),
+        });
+
+        assert!(!oidc_auth_only_enabled(&config));
+
+        config.auth.allow_oidc_auth_only = true;
+        assert!(oidc_auth_only_enabled(&config));
+
+        let oidc = config.oidc.as_mut().expect("OIDC configured");
+        oidc.admin_role = "openshell-admin".to_string();
+        oidc.user_role = "openshell-user".to_string();
+        assert!(!oidc_auth_only_enabled(&config));
     }
 
     #[test]

@@ -572,6 +572,12 @@ pub struct GatewayAuthConfig {
     /// gateway-minted sandbox JWTs.
     #[serde(default)]
     pub allow_unauthenticated_users: bool,
+
+    /// When true, an OIDC issuer may authenticate users without requiring
+    /// configured RBAC roles. Configured scope checks still apply, so shared
+    /// deployments must opt in explicitly.
+    #[serde(default)]
+    pub allow_oidc_auth_only: bool,
 }
 
 /// One configured gateway interceptor service.
@@ -895,6 +901,109 @@ impl Config {
         self.service_routing.enable_loopback_service_http = enabled;
         self
     }
+
+    /// Validate auth settings that depend on the deployment posture.
+    ///
+    /// Local loopback gateways can rely on developer-oriented auth shortcuts,
+    /// but Kubernetes and externally-bound gateways must fail closed unless
+    /// the operator chose an explicit weak mode.
+    pub fn validate_gateway_auth_posture(&self) -> Result<(), String> {
+        self.validate_gateway_auth_posture_with_extra_bind_addresses(&[])
+    }
+
+    /// Validate auth settings against the configured listener set plus
+    /// runtime-provided gateway listeners from compute drivers.
+    pub fn validate_gateway_auth_posture_with_extra_bind_addresses(
+        &self,
+        extra_bind_addresses: &[SocketAddr],
+    ) -> Result<(), String> {
+        let shared =
+            self.is_shared_gateway_deployment_with_extra_bind_addresses(extra_bind_addresses);
+
+        if self.auth.allow_oidc_auth_only && self.oidc.is_none() {
+            return Err(
+                "auth.allow_oidc_auth_only=true requires OIDC to be configured".to_string(),
+            );
+        }
+
+        if let Some(oidc) = &self.oidc {
+            let admin_set = !oidc.admin_role.is_empty();
+            let user_set = !oidc.user_role.is_empty();
+
+            if admin_set != user_set {
+                return Err(format!(
+                    "OIDC RBAC misconfiguration: admin_role={:?}, user_role={:?}. \
+                     Either set both roles (RBAC mode) or leave both empty (authentication-only mode).",
+                    oidc.admin_role, oidc.user_role,
+                ));
+            }
+
+            if admin_set && self.auth.allow_oidc_auth_only {
+                return Err(
+                    "auth.allow_oidc_auth_only=true is only valid when OIDC admin_role and user_role are both empty"
+                        .to_string(),
+                );
+            }
+
+            if shared && !admin_set && !self.auth.allow_oidc_auth_only {
+                return Err(
+                    "OIDC authentication-only mode is disabled for shared gateway deployments; \
+                     configure admin_role and user_role for RBAC, or set \
+                     auth.allow_oidc_auth_only=true to skip role checks while retaining configured scope checks"
+                        .to_string(),
+                );
+            }
+        }
+
+        if self.is_kubernetes_gateway_deployment() && self.mtls_auth.enabled {
+            return Err(
+                "mTLS user authentication is not supported with the Kubernetes compute driver; \
+                 configure OIDC or a trusted fronting proxy for user authentication"
+                    .to_string(),
+            );
+        }
+
+        let has_user_authenticator = self.oidc.is_some();
+        if shared
+            && !has_user_authenticator
+            && !self.mtls_auth.enabled
+            && !self.auth.allow_unauthenticated_users
+        {
+            return Err(
+                "shared gateway deployments require an explicit auth path; configure OIDC, \
+                 mTLS user auth, or set auth.allow_unauthenticated_users=true \
+                 only behind a trusted local-dev/fronting-proxy boundary"
+                    .to_string(),
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Whether this gateway serves a shared or remotely reachable gRPC API.
+    #[must_use]
+    pub fn is_shared_gateway_deployment(&self) -> bool {
+        self.is_shared_gateway_deployment_with_extra_bind_addresses(&[])
+    }
+
+    #[must_use]
+    fn is_shared_gateway_deployment_with_extra_bind_addresses(
+        &self,
+        extra_bind_addresses: &[SocketAddr],
+    ) -> bool {
+        self.is_kubernetes_gateway_deployment()
+            || !self.bind_address.ip().is_loopback()
+            || extra_bind_addresses
+                .iter()
+                .any(|addr| !addr.ip().is_loopback())
+    }
+
+    #[must_use]
+    fn is_kubernetes_gateway_deployment(&self) -> bool {
+        self.compute_drivers
+            .iter()
+            .any(|driver| driver == ComputeDriverKind::Kubernetes.as_str())
+    }
 }
 
 impl Default for ServiceRoutingConfig {
@@ -981,10 +1090,10 @@ mod tests {
     use super::{
         ComputeDriverKind, Config, DEFAULT_SERVICE_ROUTING_DOMAIN, GatewayInterceptorBindingPolicy,
         GatewayInterceptorConfig, GatewayInterceptorFailurePolicy, GatewayJwtConfig,
-        GatewayProviderProfileSourceConfig, detect_docker_socket_from_candidates, detect_driver,
-        detect_podman_socket_from_candidates, docker_host_unix_socket_path, docker_socket_responds,
-        is_unix_socket, normalize_compute_driver_name, podman_socket_candidates_from_env,
-        podman_socket_responds,
+        GatewayProviderProfileSourceConfig, OidcConfig, detect_docker_socket_from_candidates,
+        detect_driver, detect_podman_socket_from_candidates, docker_host_unix_socket_path,
+        docker_socket_responds, is_unix_socket, normalize_compute_driver_name,
+        podman_socket_candidates_from_env, podman_socket_responds,
     };
     #[cfg(unix)]
     use std::io::{Read as _, Write as _};
@@ -1048,6 +1157,125 @@ mod tests {
     fn config_disables_unauthenticated_users_by_default() {
         let cfg = Config::new(None);
         assert!(!cfg.auth.allow_unauthenticated_users);
+    }
+
+    fn oidc_config(admin_role: &str, user_role: &str) -> OidcConfig {
+        OidcConfig {
+            issuer: "https://issuer.example.com".to_string(),
+            audience: "openshell-cli".to_string(),
+            jwks_ttl_secs: 3600,
+            roles_claim: "realm_access.roles".to_string(),
+            admin_role: admin_role.to_string(),
+            user_role: user_role.to_string(),
+            scopes_claim: String::new(),
+        }
+    }
+
+    #[test]
+    fn gateway_auth_posture_allows_loopback_oidc_auth_only_without_override() {
+        let cfg = Config::new(None).with_oidc(oidc_config("", ""));
+
+        assert!(cfg.validate_gateway_auth_posture().is_ok());
+    }
+
+    #[test]
+    fn gateway_auth_posture_rejects_shared_oidc_auth_only_without_override() {
+        let cfg = Config::new(None)
+            .with_compute_drivers([ComputeDriverKind::Kubernetes])
+            .with_oidc(oidc_config("", ""));
+
+        let err = cfg.validate_gateway_auth_posture().unwrap_err();
+        assert!(err.contains("OIDC authentication-only mode"));
+    }
+
+    #[test]
+    fn gateway_auth_posture_allows_shared_oidc_auth_only_with_override() {
+        let mut cfg = Config::new(None)
+            .with_compute_drivers([ComputeDriverKind::Kubernetes])
+            .with_oidc(oidc_config("", ""));
+        cfg.auth.allow_oidc_auth_only = true;
+
+        assert!(cfg.validate_gateway_auth_posture().is_ok());
+    }
+
+    #[test]
+    fn gateway_auth_posture_rejects_oidc_auth_only_override_without_oidc() {
+        let mut cfg = Config::new(None);
+        cfg.auth.allow_oidc_auth_only = true;
+
+        let err = cfg.validate_gateway_auth_posture().unwrap_err();
+        assert!(err.contains("requires OIDC to be configured"));
+    }
+
+    #[test]
+    fn gateway_auth_posture_rejects_oidc_auth_only_override_with_rbac() {
+        let mut cfg = Config::new(None).with_oidc(oidc_config("openshell-admin", "openshell-user"));
+        cfg.auth.allow_oidc_auth_only = true;
+
+        let err = cfg.validate_gateway_auth_posture().unwrap_err();
+        assert!(err.contains("only valid when OIDC admin_role and user_role are both empty"));
+    }
+
+    #[test]
+    fn gateway_auth_posture_allows_shared_oidc_rbac() {
+        let cfg = Config::new(None)
+            .with_compute_drivers([ComputeDriverKind::Kubernetes])
+            .with_oidc(oidc_config("openshell-admin", "openshell-user"));
+
+        assert!(cfg.validate_gateway_auth_posture().is_ok());
+    }
+
+    #[test]
+    fn gateway_auth_posture_rejects_partial_oidc_roles() {
+        let cfg = Config::new(None).with_oidc(oidc_config("openshell-admin", ""));
+
+        let err = cfg.validate_gateway_auth_posture().unwrap_err();
+        assert!(err.contains("OIDC RBAC misconfiguration"));
+    }
+
+    #[test]
+    fn gateway_auth_posture_rejects_shared_gateway_without_auth_path() {
+        let cfg = Config::new(None).with_compute_drivers([ComputeDriverKind::Kubernetes]);
+
+        let err = cfg.validate_gateway_auth_posture().unwrap_err();
+        assert!(err.contains("require an explicit auth path"));
+    }
+
+    #[test]
+    fn gateway_auth_posture_rejects_shared_gateway_with_only_sandbox_jwt() {
+        let mut cfg = Config::new(None).with_compute_drivers([ComputeDriverKind::Kubernetes]);
+        cfg.gateway_jwt = Some(GatewayJwtConfig {
+            signing_key_path: "/tmp/signing.pem".into(),
+            public_key_path: "/tmp/public.pem".into(),
+            kid_path: "/tmp/kid".into(),
+            gateway_id: "openshell".to_string(),
+            ttl_secs: 3600,
+        });
+
+        let err = cfg.validate_gateway_auth_posture().unwrap_err();
+        assert!(err.contains("require an explicit auth path"));
+    }
+
+    #[test]
+    fn gateway_auth_posture_rejects_runtime_non_loopback_listener_without_auth_path() {
+        let cfg = Config::new(None);
+        let driver_bind: SocketAddr = "172.18.0.1:17670".parse().expect("valid address");
+
+        let err = cfg
+            .validate_gateway_auth_posture_with_extra_bind_addresses(&[driver_bind])
+            .unwrap_err();
+        assert!(err.contains("require an explicit auth path"));
+    }
+
+    #[test]
+    fn gateway_auth_posture_rejects_kubernetes_mtls_user_auth() {
+        let mut cfg = Config::new(None)
+            .with_compute_drivers([ComputeDriverKind::Kubernetes])
+            .with_oidc(oidc_config("openshell-admin", "openshell-user"));
+        cfg.mtls_auth.enabled = true;
+
+        let err = cfg.validate_gateway_auth_posture().unwrap_err();
+        assert!(err.contains("mTLS user authentication is not supported"));
     }
 
     #[test]
