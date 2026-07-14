@@ -54,6 +54,17 @@ paths, such as proxy support files or GPU device paths when a GPU is present.
 All ordinary agent egress is routed through the sandbox proxy. The proxy
 identifies the calling binary, checks trust-on-first-use binary identity, rejects
 unsafe internal destinations, and evaluates the active policy.
+
+CONNECT and absolute-form forward HTTP are explicit-proxy adapters over the same
+egress pipeline. Each adapter normalizes its request into an egress intent, and
+the shared authorization result carries the process evidence and endpoint state
+used by destination validation and relay selection. Destination validation
+returns an unopened connector so adapters retain their existing response and
+upstream-dial timing. CONNECT uses shared TLS-terminated HTTP, plaintext HTTP,
+and raw byte relay primitives. Forward HTTP retains its guarded single-request
+relay while sharing authorization, request context, and destination boundaries.
+Adapter-specific response and OCSF event shapes remain at the protocol boundary.
+
 For inspected HTTP traffic, the proxy can enforce REST method/path rules,
 WebSocket upgrade and text-message rules, GraphQL operation rules, and
 MCP method, tool, and supported params rules or generic JSON-RPC method rules
