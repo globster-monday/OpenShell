@@ -1,0 +1,42 @@
+# syntax=docker/dockerfile:1.4
+
+# Build the downstream gateway directly in ACR. Keep this file isolated from
+# upstream packaging so the fork's functional patch remains easy to rebase.
+FROM rust@sha256:4c2fd73ef19c5ef9d54bee03b06b2839a392604fbfcd578ed948b71b37c1d7fb AS builder
+
+ARG OPENSHELL_CARGO_VERSION=0.0.91-globster.1
+ARG OPENSHELL_IMAGE_TAG=0.0.91
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    clang \
+    cmake \
+    libclang-dev \
+    libssl-dev \
+    libz3-dev \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY . .
+
+RUN sed -i -E \
+      '/^\[workspace\.package\]/,/^\[/{s/^version[[:space:]]*=[[:space:]]*".*"/version = "'"${OPENSHELL_CARGO_VERSION}"'"/}' \
+      Cargo.toml \
+    && OPENSHELL_IMAGE_TAG="${OPENSHELL_IMAGE_TAG}" \
+      cargo build --locked --release \
+        -p openshell-server \
+        --bin openshell-gateway \
+        --features bundled-z3 \
+    && target/release/openshell-gateway --version
+
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:e1fd250ce83d94603e9887ec991156a6c26905a6b0001039b7a43699018c0733
+
+COPY --from=builder /src/target/release/openshell-gateway /usr/local/bin/openshell-gateway
+
+USER 1000:1000
+EXPOSE 8080
+
+ENTRYPOINT ["/usr/local/bin/openshell-gateway"]
+CMD ["--bind-address", "0.0.0.0", "--port", "8080"]
