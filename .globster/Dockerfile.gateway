@@ -21,11 +21,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /src
 COPY . .
 
+# Match the upstream release pipeline: the version patch requires Cargo to
+# refresh workspace package entries in Cargo.lock during the build.
 RUN sed -i -E \
       '/^\[workspace\.package\]/,/^\[/{s/^version[[:space:]]*=[[:space:]]*".*"/version = "'"${OPENSHELL_CARGO_VERSION}"'"/}' \
       Cargo.toml \
     && OPENSHELL_IMAGE_TAG="${OPENSHELL_IMAGE_TAG}" \
-      cargo build --locked --release \
+      cargo build --release \
         -p openshell-server \
         --bin openshell-gateway \
         --features bundled-z3 \
