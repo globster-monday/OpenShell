@@ -1,13 +1,15 @@
 name: Globster Gateway Release
 
 on:
-  workflow_dispatch:
-    inputs:
-      image_tag:
-        description: Immutable downstream release tag
-        required: true
-        default: 0.0.91-globster.1
-        type: string
+  push:
+    branches:
+      - codex/workspace-storage-class-v0.0.91
+    paths:
+      - .github/workflows/globster-gateway-release.yml
+      - .globster/Dockerfile.gateway
+      - Cargo.lock
+      - Cargo.toml
+      - crates/**
 
 permissions:
   contents: read
@@ -19,7 +21,7 @@ concurrency:
 
 env:
   IMAGE_REPOSITORY: openshell/gateway
-  RELEASE_TAG: ${{ inputs.image_tag }}
+  RELEASE_TAG: 0.0.91-globster.1
 
 jobs:
   build:
