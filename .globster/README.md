@@ -11,13 +11,15 @@ Current release:
 - Upstream patch: `NVIDIA/OpenShell#2463`
 - Image: `crglobsterglobal.azurecr.io/openshell/gateway:0.0.91-globster.1`
 
-Publish the AMD64 gateway with the `Globster Gateway Release` GitHub Actions
-workflow. The workflow compiles the gateway with a persistent BuildKit cache,
-authenticates to Azure through workload identity federation, pushes immutable
-version and commit tags to ACR, and records the resulting image digest.
+Build the AMD64 gateway remotely in Azure Container Registry:
 
-Direct ACR quick builds are not the release path: the default two-CPU worker
-cannot complete a cold OpenShell build reliably within a short feedback loop.
+```bash
+az acr build \
+  --registry crglobsterglobal \
+  --image openshell/gateway:0.0.91-globster.1 \
+  --file .globster/Dockerfile.gateway \
+  .
+```
 
 For a new upstream release, create a new branch from its signed release tag,
 reapply only the still-unmerged downstream commits, update the two version
