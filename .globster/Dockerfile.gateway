@@ -1,9 +1,10 @@
-# syntax=docker/dockerfile:1.4
+# syntax=docker/dockerfile:1.7
 
-# Build the downstream gateway directly in ACR. Keep this file isolated from
-# upstream packaging so the fork's functional patch remains easy to rebase.
-FROM rust@sha256:443dd9a3260cf23c22fc05051dd5661dd7b4028d3d25dbaffab6563b63c3539c AS builder
+# Keep the downstream release path isolated from upstream packaging so the
+# functional patch remains easy to rebase or remove.
+FROM rust@sha256:443dd9a3260cf23c22fc05051dd5661dd7b4028d3d25dbaffab6563b63c3539c AS chef
 
+ARG CARGO_CHEF_VERSION=0.1.77
 ARG OPENSHELL_CARGO_VERSION=0.0.91-globster.1
 ARG OPENSHELL_IMAGE_TAG=0.0.91
 
@@ -19,16 +20,40 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
+
+RUN cargo install cargo-chef \
+      --version "${CARGO_CHEF_VERSION}" \
+      --locked
+
+FROM chef AS planner
+
 COPY . .
 
-# Match the upstream release pipeline: the version patch requires Cargo to
-# refresh workspace package entries in Cargo.lock during the build.
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS builder
+
+COPY --from=planner /src/recipe.json recipe.json
+
+# This layer changes only when Cargo manifests or the lockfile change.
+RUN cargo chef cook \
+      --release \
+      --recipe-path recipe.json \
+      --package openshell-server \
+      --bin openshell-gateway \
+      --features bundled-z3
+
+COPY . .
+
+# Match the upstream release pipeline. The version patch intentionally allows
+# Cargo to refresh workspace package entries in Cargo.lock during the build.
 RUN sed -i -E \
       '/^\[workspace\.package\]/,/^\[/{s/^version[[:space:]]*=[[:space:]]*".*"/version = "'"${OPENSHELL_CARGO_VERSION}"'"/}' \
       Cargo.toml \
     && OPENSHELL_IMAGE_TAG="${OPENSHELL_IMAGE_TAG}" \
-      cargo build --release \
-        -p openshell-server \
+      cargo build \
+        --release \
+        --package openshell-server \
         --bin openshell-gateway \
         --features bundled-z3 \
     && target/release/openshell-gateway --version
