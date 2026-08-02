@@ -2208,6 +2208,7 @@ async fn handle_update_config_inner(
         })?
     };
     response_annotations = committed_annotations;
+    state.sandbox_watch_bus.notify(&sandbox_id);
 
     if backfill_policy.is_some() {
         info!(
@@ -12241,6 +12242,7 @@ mod tests {
             )
             .await
             .unwrap();
+        let mut watch_rx = state.sandbox_watch_bus.subscribe("sb-same-hash");
 
         let response = handle_update_config(
             &state,
@@ -12259,6 +12261,9 @@ mod tests {
         .into_inner();
 
         assert_eq!(response.version, 2);
+        watch_rx
+            .try_recv()
+            .expect("new provenance revision must notify the sandbox watcher");
         assert_eq!(
             response
                 .annotations
