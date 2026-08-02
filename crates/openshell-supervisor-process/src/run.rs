@@ -10,9 +10,11 @@
 //! orchestrator, not here.
 
 use miette::{IntoDiagnostic, Result};
+use nix::sys::signal::Signal;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
+use tokio::sync::oneshot;
 use tokio::time::timeout;
 use tracing::info;
 
@@ -36,8 +38,42 @@ use openshell_core::denial::DenialEvent;
 use crate::managed_children;
 use crate::process::{ProcessEnforcementMode, ProcessHandle};
 
+const RESIDENT_SHUTDOWN_GRACE: Duration = Duration::from_secs(25);
+
+enum WaitOutcome {
+    Exited(std::io::Result<crate::process::ProcessStatus>),
+    Shutdown(Signal),
+    TimedOut,
+}
+
 fn ocsf_ctx() -> &'static openshell_ocsf::SandboxContext {
     openshell_ocsf::ctx::ctx()
+}
+
+async fn wait_for_process_shutdown_signal(
+    external_shutdown: Option<oneshot::Receiver<Signal>>,
+) -> std::io::Result<Signal> {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut sigterm = signal(SignalKind::terminate())?;
+    let mut sigint = signal(SignalKind::interrupt())?;
+    if let Some(external_shutdown) = external_shutdown {
+        tokio::select! {
+            _ = sigterm.recv() => Ok(Signal::SIGTERM),
+            _ = sigint.recv() => Ok(Signal::SIGINT),
+            signal = external_shutdown => signal.map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "external shutdown channel closed without a signal",
+                )
+            }),
+        }
+    } else {
+        tokio::select! {
+            _ = sigterm.recv() => Ok(Signal::SIGTERM),
+            _ = sigint.recv() => Ok(Signal::SIGINT),
+        }
+    }
 }
 
 /// Spawn the workload entrypoint, wire up SSH and supervisor session, and
@@ -61,7 +97,8 @@ pub async fn run_process(
     policy: &SandboxPolicy,
     enforcement_mode: ProcessEnforcementMode,
     entrypoint_pid: Arc<AtomicU32>,
-    entrypoint_started_tx: Option<tokio::sync::oneshot::Sender<u32>>,
+    entrypoint_started_tx: Option<oneshot::Sender<u32>>,
+    external_shutdown: Option<oneshot::Receiver<Signal>>,
     provider_credentials: ProviderCredentialState,
     provider_env: std::collections::HashMap<String, String>,
     ca_file_paths: Option<(std::path::PathBuf, std::path::PathBuf)>,
@@ -235,7 +272,7 @@ pub async fn run_process(
                 .and_then(|json| serde_json::from_str(&json).ok())
                 .unwrap_or_default();
 
-        let (ssh_ready_tx, ssh_ready_rx) = tokio::sync::oneshot::channel();
+        let (ssh_ready_tx, ssh_ready_rx) = oneshot::channel();
 
         tokio::spawn(async move {
             if let Err(err) = crate::ssh::run_ssh_server(
@@ -353,11 +390,36 @@ pub async fn run_process(
             .build()
     );
 
-    // Wait for process with optional timeout
-    let result = if timeout_secs > 0 {
-        if let Ok(result) = timeout(Duration::from_secs(timeout_secs), handle.wait()).await {
-            result
+    // Wait for the entrypoint, while retaining PID 1 responsibility for
+    // forwarding Kubernetes SIGTERM/SIGINT to the supervised resident process.
+    // The inner scope drops the pinned wait future before `handle` is used to
+    // signal or reap the child.
+    let outcome = {
+        let wait = handle.wait();
+        let shutdown = wait_for_process_shutdown_signal(external_shutdown);
+        tokio::pin!(wait);
+        tokio::pin!(shutdown);
+        if timeout_secs > 0 {
+            tokio::select! {
+                result = &mut wait => WaitOutcome::Exited(result),
+                () = tokio::time::sleep(Duration::from_secs(timeout_secs)) => WaitOutcome::TimedOut,
+                signal = &mut shutdown => {
+                    WaitOutcome::Shutdown(signal.into_diagnostic()?)
+                }
+            }
         } else {
+            tokio::select! {
+                result = &mut wait => WaitOutcome::Exited(result),
+                signal = &mut shutdown => {
+                    WaitOutcome::Shutdown(signal.into_diagnostic()?)
+                }
+            }
+        }
+    };
+
+    let result = match outcome {
+        WaitOutcome::Exited(result) => result,
+        WaitOutcome::TimedOut => {
             ocsf_emit!(
                 ProcessActivityBuilder::new(ocsf_ctx())
                     .activity(ActivityId::Close)
@@ -371,8 +433,25 @@ pub async fn run_process(
             handle.kill()?;
             return Ok(124); // Standard timeout exit code
         }
-    } else {
-        handle.wait().await
+        WaitOutcome::Shutdown(signal) => {
+            info!(
+                ?signal,
+                child_pid = handle.pid(),
+                "Forwarding shutdown signal to resident process"
+            );
+            handle.signal(signal)?;
+            if let Ok(result) = timeout(RESIDENT_SHUTDOWN_GRACE, handle.wait()).await {
+                result
+            } else {
+                tracing::warn!(
+                    child_pid = handle.pid(),
+                    grace_seconds = RESIDENT_SHUTDOWN_GRACE.as_secs(),
+                    "Resident process exceeded graceful shutdown deadline; killing"
+                );
+                handle.kill()?;
+                handle.wait().await
+            }
+        }
     };
 
     let status = result.into_diagnostic()?;
@@ -508,5 +587,27 @@ mod tests {
         let policy = policy(NetworkMode::Allow, Some(([127, 0, 0, 1], 3128).into()));
 
         assert_eq!(ssh_proxy_url_for_policy(&policy, None), None);
+    }
+
+    #[tokio::test]
+    async fn external_shutdown_selects_requested_signal() {
+        let (tx, rx) = oneshot::channel();
+        tx.send(Signal::SIGTERM).unwrap();
+
+        let signal = wait_for_process_shutdown_signal(Some(rx)).await.unwrap();
+
+        assert_eq!(signal, Signal::SIGTERM);
+    }
+
+    #[tokio::test]
+    async fn closed_external_shutdown_fails_instead_of_hanging() {
+        let (tx, rx) = oneshot::channel();
+        drop(tx);
+
+        let error = wait_for_process_shutdown_signal(Some(rx))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
     }
 }
