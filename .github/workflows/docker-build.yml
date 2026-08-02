@@ -190,6 +190,7 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}
     env:
+      CONTAINER_ENGINE: docker
       IMAGE_TAG: ${{ format('{0}-{1}', needs.resolve.outputs.image_tag_base, matrix.arch) }}
       IMAGE_REGISTRY: ghcr.io/globster-monday/openshell
       DOCKER_PUSH: ${{ inputs.push && '1' || '0' }}
