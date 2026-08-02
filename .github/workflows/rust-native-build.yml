@@ -83,11 +83,6 @@ jobs:
       # concurrent jobs collide on the same cache key and later-starting
       # writers hit 409 Conflict.
       SCCACHE_GHA_VERSION: ${{ inputs.component }}-${{ inputs.arch }}
-    container:
-      image: ghcr.io/nvidia/openshell/ci:latest
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

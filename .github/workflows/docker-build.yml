@@ -189,17 +189,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}
-    container:
-      image: ghcr.io/nvidia/openshell/ci:latest
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-      options: --privileged
-      volumes:
-        - /var/run/docker.sock:/var/run/docker.sock
-        # Expose the nv-gha-runners buildkitd.toml registry mirror config
-        # inside the container so setup-buildx can read it.
-        - /etc/buildkit:/etc/buildkit:ro
     env:
       IMAGE_TAG: ${{ format('{0}-{1}', needs.resolve.outputs.image_tag_base, matrix.arch) }}
       IMAGE_REGISTRY: ghcr.io/globster-monday/openshell
@@ -280,13 +269,6 @@ jobs:
     if: ${{ inputs.push && inputs['publish-manifest'] && needs.resolve.outputs.has_image == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    container:
-      image: ghcr.io/nvidia/openshell/ci:latest
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-      volumes:
-        - /var/run/docker.sock:/var/run/docker.sock
     steps:
       - name: Log in to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
