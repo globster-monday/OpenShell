@@ -74,7 +74,7 @@ jobs:
     # labels are private to the upstream organization; the build itself is
     # already cross-platform through the checked-in Zig wrappers.
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 90
     env:
       COMPONENT: ${{ inputs.component }}
       ARCH: ${{ inputs.arch }}
