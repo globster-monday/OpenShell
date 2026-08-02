@@ -79,10 +79,6 @@ jobs:
       COMPONENT: ${{ inputs.component }}
       ARCH: ${{ inputs.arch }}
       FEATURES: ${{ inputs.features }}
-      # Partition the GHA sccache cache per (component, arch). Without this,
-      # concurrent jobs collide on the same cache key and later-starting
-      # writers hit 409 Conflict.
-      SCCACHE_GHA_VERSION: ${{ inputs.component }}-${{ inputs.arch }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -250,7 +246,11 @@ jobs:
           if [[ -n "${{ steps.version.outputs.cargo_version }}" ]]; then
             export GIT_DIR=/nonexistent
           fi
-          mise x -- "${cargo_cmd[@]}" "${args[@]}"
+          # mise.toml enables the upstream private sccache wrapper. Keep mise's
+          # tool PATH, but remove that wrapper at the command boundary on the
+          # GitHub-hosted publisher.
+          mise x -- env -u RUSTC_WRAPPER -u SCCACHE_GHA_ENABLED -u SCCACHE_GHA_VERSION \
+            "${cargo_cmd[@]}" "${args[@]}"
 
       - name: Verify packaged binary
         if: inputs.arch == 'amd64'
