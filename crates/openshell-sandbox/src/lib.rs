@@ -15,6 +15,7 @@ mod metadata_server;
 mod sidecar_control;
 
 use miette::{IntoDiagnostic, Result, WrapErr};
+use nix::sys::signal::Signal;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
@@ -694,6 +695,12 @@ pub async fn run_sandbox(
             } else {
                 None
             };
+        let (process_shutdown_tx, process_shutdown_rx) = if process_control_closed.is_some() {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
 
         let process = openshell_supervisor_process::run::run_process(
             program,
@@ -709,6 +716,7 @@ pub async fn run_sandbox(
             process_enforcement_mode,
             entrypoint_pid,
             entrypoint_started_tx,
+            process_shutdown_rx,
             provider_credentials,
             provider_env,
             ca_file_paths,
@@ -722,8 +730,9 @@ pub async fn run_sandbox(
         );
 
         if let Some(control_closed) = process_control_closed.as_mut() {
+            tokio::pin!(process);
             tokio::select! {
-                result = process => result?,
+                result = &mut process => result?,
                 _ = control_closed => {
                     ocsf_emit!(
                         AppLifecycleBuilder::new(ocsf_ctx())
@@ -735,6 +744,16 @@ pub async fn run_sandbox(
                             )
                             .build()
                     );
+                    if process_shutdown_tx
+                        .expect("sidecar control requires a process shutdown channel")
+                        .send(Signal::SIGTERM)
+                        .is_err()
+                    {
+                        debug!(
+                            "Resident process completed while handling sidecar control shutdown"
+                        );
+                    }
+                    let _ = process.await?;
                     return Err(miette::miette!(
                         "authoritative network-sidecar control channel closed"
                     ));
@@ -2382,6 +2401,20 @@ fn initial_poll_disposition(
     }
 }
 
+fn unchanged_policy_revision_to_ack(
+    reloads_gateway_policy: bool,
+    current_policy_version: u32,
+    current_policy_hash: &str,
+    result: &openshell_core::grpc_client::SettingsPollResult,
+) -> Option<u32> {
+    (reloads_gateway_policy
+        && !current_policy_hash.is_empty()
+        && result.policy_source == openshell_core::proto::PolicySource::Sandbox
+        && result.version > current_policy_version
+        && result.policy_hash == current_policy_hash)
+        .then_some(result.version)
+}
+
 /// Deliver policy status updates independently from policy reconciliation.
 ///
 /// The channel is FIFO, so a delayed older status can never arrive after a
@@ -2620,6 +2653,7 @@ async fn run_policy_poll_loop(ctx: PolicyPollLoopContext) -> Result<()> {
 
     let mut current_config_revision: u64 = 0;
     let mut current_provider_env_revision: u64 = ctx.provider_credentials.snapshot().revision;
+    let mut current_policy_version: u32 = 0;
     let mut current_policy_hash = String::new();
     let mut current_middleware_services = Vec::new();
     let mut middleware_registry_status = ctx.middleware_registry_status;
@@ -2653,6 +2687,7 @@ async fn run_policy_poll_loop(ctx: PolicyPollLoopContext) -> Result<()> {
                         skills::install_static_skills,
                     );
                     current_config_revision = candidate.config_revision;
+                    current_policy_version = candidate.version;
                     current_policy_hash.clone_from(&candidate.policy_hash);
                     current_middleware_services = result.supervisor_middleware_services;
                     current_settings = result.settings;
@@ -2726,6 +2761,12 @@ async fn run_policy_poll_loop(ctx: PolicyPollLoopContext) -> Result<()> {
             &result.supervisor_middleware_services,
             middleware_registry_status,
         );
+        let unchanged_policy_revision = unchanged_policy_revision_to_ack(
+            reloads_gateway_policy,
+            current_policy_version,
+            &current_policy_hash,
+            &result,
+        );
 
         // A local policy override is not coupled to the gateway policy
         // snapshot, so its service registry can still be reconciled alone.
@@ -2741,7 +2782,11 @@ async fn run_policy_poll_loop(ctx: PolicyPollLoopContext) -> Result<()> {
             .await;
         }
 
-        if !config_changed && !provider_env_changed && !policy_runtime_changed {
+        if !config_changed
+            && !provider_env_changed
+            && !policy_runtime_changed
+            && unchanged_policy_revision.is_none()
+        {
             continue;
         }
 
@@ -2885,7 +2930,11 @@ async fn run_policy_poll_loop(ctx: PolicyPollLoopContext) -> Result<()> {
                                 &status_sender,
                                 PolicyStatusUpdate::loaded(result.version),
                             );
+                            current_policy_version = result.version;
                         }
+                    } else if let Some(version) = unchanged_policy_revision {
+                        enqueue_policy_status(&status_sender, PolicyStatusUpdate::loaded(version));
+                        current_policy_version = version;
                     }
 
                     if middleware_registry_changed {
@@ -2940,6 +2989,23 @@ async fn run_policy_poll_loop(ctx: PolicyPollLoopContext) -> Result<()> {
                     // NeedsReconciliation), not by degrading the status here.
                 }
             }
+        }
+
+        if !policy_runtime_changed && let Some(version) = unchanged_policy_revision {
+            enqueue_policy_status(&status_sender, PolicyStatusUpdate::loaded(version));
+            current_policy_version = version;
+            ocsf_emit!(
+                ConfigStateChangeBuilder::new(ocsf_ctx())
+                    .severity(SeverityId::Informational)
+                    .status(StatusId::Success)
+                    .state(StateId::Enabled, "loaded")
+                    .unmapped("version", serde_json::json!(version))
+                    .unmapped("policy_hash", serde_json::json!(&result.policy_hash))
+                    .message(format!(
+                        "Acknowledged unchanged policy revision as loaded [version:{version}]"
+                    ))
+                    .build()
+            );
         }
 
         // Apply OCSF JSON toggle from the `ocsf_json_enabled` setting.
@@ -3732,6 +3798,35 @@ filesystem_policy:
             InitialPollDisposition::Reconcile
         );
         assert!(origin.allows_gateway_policy_reload());
+    }
+
+    #[test]
+    fn unchanged_sandbox_policy_revision_is_acknowledged_without_reload() {
+        let result = openshell_core::grpc_client::SettingsPollResult {
+            policy_hash: "same-policy".to_string(),
+            ..settings_poll_result(
+                Some(proto_policy_fixture()),
+                2,
+                openshell_core::proto::PolicySource::Sandbox,
+            )
+        };
+
+        assert_eq!(
+            unchanged_policy_revision_to_ack(true, 1, "same-policy", &result),
+            Some(2)
+        );
+        assert_eq!(
+            unchanged_policy_revision_to_ack(true, 2, "same-policy", &result),
+            None
+        );
+        assert_eq!(
+            unchanged_policy_revision_to_ack(true, 1, "different-policy", &result),
+            None
+        );
+        assert_eq!(
+            unchanged_policy_revision_to_ack(false, 1, "same-policy", &result),
+            None
+        );
     }
 
     #[test]
