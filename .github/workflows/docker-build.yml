@@ -126,11 +126,11 @@ jobs:
             case "$platform" in
               linux/amd64)
                 arch=amd64
-                runner=linux-amd64-cpu8
+                runner=ubuntu-24.04
                 ;;
               linux/arm64)
                 arch=arm64
-                runner=linux-arm64-cpu8
+                runner=ubuntu-24.04
                 ;;
               *)
                 echo "unsupported platform: $platform" >&2
@@ -202,7 +202,7 @@ jobs:
         - /etc/buildkit:/etc/buildkit:ro
     env:
       IMAGE_TAG: ${{ format('{0}-{1}', needs.resolve.outputs.image_tag_base, matrix.arch) }}
-      IMAGE_REGISTRY: ghcr.io/nvidia/openshell
+      IMAGE_REGISTRY: ghcr.io/globster-monday/openshell
       DOCKER_PUSH: ${{ inputs.push && '1' || '0' }}
       DOCKER_PLATFORM: ${{ matrix.platform }}
     steps:
@@ -278,7 +278,7 @@ jobs:
     name: Merge ${{ inputs.component }} manifest
     needs: [resolve, build]
     if: ${{ inputs.push && inputs['publish-manifest'] && needs.resolve.outputs.has_image == 'true' }}
-    runs-on: linux-amd64-cpu8
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     container:
       image: ghcr.io/nvidia/openshell/ci:latest
@@ -294,7 +294,7 @@ jobs:
       - name: Create multi-arch manifest
         run: |
           set -euo pipefail
-          image="ghcr.io/nvidia/openshell/${{ inputs.component }}"
+          image="ghcr.io/globster-monday/openshell/${{ inputs.component }}"
           refs=()
           for arch in ${{ needs.resolve.outputs.arches }}; do
             refs+=("${image}:${{ needs.resolve.outputs.image_tag_base }}-${arch}")

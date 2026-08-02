@@ -70,7 +70,10 @@ defaults:
 jobs:
   rust-native-build:
     name: ${{ inputs.component }} (${{ inputs.arch }})
-    runs-on: ${{ inputs.arch == 'arm64' && 'linux-arm64-cpu8' || 'linux-amd64-cpu8' }}
+    # The maintained fork uses GitHub-hosted runners. The upstream NVIDIA
+    # labels are private to the upstream organization; the build itself is
+    # already cross-platform through the checked-in Zig wrappers.
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
       COMPONENT: ${{ inputs.component }}
