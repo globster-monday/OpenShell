@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   gateway:
-    uses: globster-monday/OpenShell/.github/workflows/docker-build.yml@nave/setup/openshell-resident-images
+    uses: globster-monday/OpenShell/.github/workflows/docker-build.yml@a4e5b4acd155c920a3d1dc60c17b19afdada856d
     with:
       component: gateway
       cargo-version: 0.0.92-globster.1
@@ -20,7 +20,7 @@ jobs:
     secrets: inherit
 
   supervisor:
-    uses: globster-monday/OpenShell/.github/workflows/docker-build.yml@nave/setup/openshell-resident-images
+    uses: globster-monday/OpenShell/.github/workflows/docker-build.yml@a4e5b4acd155c920a3d1dc60c17b19afdada856d
     with:
       component: supervisor
       cargo-version: 0.0.92-globster.1
