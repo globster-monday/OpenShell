@@ -59,9 +59,9 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
   MISE_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-  # Route sccache (already RUSTC_WRAPPER in mise.toml) to the GHA cache
-  # backend instead of the EKS memcached used by ARC.
-  SCCACHE_GHA_ENABLED: "true"
+  # Hosted publication prioritizes portability over the upstream runner's
+  # organization-private sccache service.
+  RUSTC_WRAPPER: ""
 
 defaults:
   run:
@@ -94,11 +94,6 @@ jobs:
 
       - name: Fetch tags
         run: git fetch --tags --force
-
-      - name: Configure GHA sccache backend
-        # Exposes ACTIONS_CACHE_URL / ACTIONS_RUNTIME_TOKEN before `mise install`
-        # compiles cargo-installed tools through RUSTC_WRAPPER=sccache.
-        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
 
       - name: Install mise
         uses: jdx/mise-action@5228313ee0372e111a38da051671ca30fc5a96db # v3
@@ -258,6 +253,7 @@ jobs:
           mise x -- "${cargo_cmd[@]}" "${args[@]}"
 
       - name: Verify packaged binary
+        if: inputs.arch == 'amd64'
         run: |
           set -euo pipefail
           BIN="target/${{ steps.target.outputs.target }}/release/${{ steps.target.outputs.binary }}"
@@ -271,6 +267,13 @@ jobs:
             echo "gateway binary must not depend on shared libz3; enable bundled-z3 for image artifacts" >&2
             exit 1
           fi
+
+      - name: Verify ARM64 packaged binary architecture
+        if: inputs.arch == 'arm64'
+        run: |
+          set -euo pipefail
+          BIN="target/${{ steps.target.outputs.target }}/release/${{ steps.target.outputs.binary }}"
+          file "$BIN" | tee /dev/stderr | grep -Eq 'ARM aarch64|ARM64'
 
       - name: Verify glibc symbol floor
         if: inputs.component == 'gateway'
@@ -296,15 +299,3 @@ jobs:
           path: prebuilt-binaries/${{ inputs.arch }}/${{ steps.target.outputs.binary }}
           retention-days: ${{ inputs['retention-days'] }}
           if-no-files-found: error
-
-      - name: sccache stats
-        if: always()
-        run: |
-          set +e
-          stats_bin="${SCCACHE_PATH:-sccache}"
-          "$stats_bin" --show-stats
-          status=$?
-          if [[ $status -ne 0 ]]; then
-            echo "::warning::sccache stats unavailable (exit $status)"
-          fi
-          exit 0
