@@ -37,7 +37,7 @@ use openshell_core::proto::compute::v1::{
     watch_sandboxes_event,
 };
 use openshell_core::proto_struct::{struct_to_json_object, value_to_json};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 use std::pin::Pin;
@@ -135,7 +135,8 @@ impl KubernetesSandboxDriverConfig {
         validate_kubernetes_driver_volume_mounts(
             &self.volumes,
             &self.containers.agent.volume_mounts,
-        )
+        )?;
+        self.containers.agent.validate()
     }
 
     fn has_explicit_sandbox_data_mount(&self) -> bool {
@@ -168,6 +169,181 @@ struct KubernetesDriverContainersConfig {
 struct KubernetesContainerDriverConfig {
     resources: KubernetesContainerResourceConfig,
     volume_mounts: Vec<KubernetesDriverVolumeMountConfig>,
+    resident_command: Vec<String>,
+    startup_probe: Option<KubernetesHttpProbeConfig>,
+    readiness_probe: Option<KubernetesHttpProbeConfig>,
+    liveness_probe: Option<KubernetesHttpProbeConfig>,
+}
+
+const MAX_RESIDENT_COMMAND_ARGS: usize = 128;
+const MAX_RESIDENT_COMMAND_ARG_BYTES: usize = 4096;
+const MAX_HTTP_PROBE_PATH_BYTES: usize = 2048;
+const MAX_HTTP_PROBE_SECONDS: u32 = 3600;
+const MAX_HTTP_PROBE_FAILURE_THRESHOLD: u32 = 100;
+
+fn default_http_probe_period_seconds() -> u32 {
+    10
+}
+
+fn default_http_probe_timeout_seconds() -> u32 {
+    1
+}
+
+fn default_http_probe_failure_threshold() -> u32 {
+    3
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn deserialize_protobuf_u16<'de, D>(deserializer: D) -> Result<u16, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = f64::deserialize(deserializer)?;
+    if !value.is_finite() || value.fract() != 0.0 || !(0.0..=f64::from(u16::MAX)).contains(&value) {
+        return Err(serde::de::Error::custom(
+            "expected an integer between 0 and 65535",
+        ));
+    }
+    Ok(value as u16)
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn deserialize_protobuf_u32<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = f64::deserialize(deserializer)?;
+    if !value.is_finite() || value.fract() != 0.0 || !(0.0..=f64::from(u32::MAX)).contains(&value) {
+        return Err(serde::de::Error::custom(
+            "expected an integer between 0 and 4294967295",
+        ));
+    }
+    Ok(value as u32)
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct KubernetesHttpProbeConfig {
+    path: String,
+    #[serde(deserialize_with = "deserialize_protobuf_u16")]
+    port: u16,
+    #[serde(deserialize_with = "deserialize_protobuf_u32")]
+    initial_delay_seconds: u32,
+    #[serde(deserialize_with = "deserialize_protobuf_u32")]
+    period_seconds: u32,
+    #[serde(deserialize_with = "deserialize_protobuf_u32")]
+    timeout_seconds: u32,
+    #[serde(deserialize_with = "deserialize_protobuf_u32")]
+    failure_threshold: u32,
+}
+
+impl Default for KubernetesHttpProbeConfig {
+    fn default() -> Self {
+        Self {
+            path: String::new(),
+            port: 0,
+            initial_delay_seconds: 0,
+            period_seconds: default_http_probe_period_seconds(),
+            timeout_seconds: default_http_probe_timeout_seconds(),
+            failure_threshold: default_http_probe_failure_threshold(),
+        }
+    }
+}
+
+impl KubernetesContainerDriverConfig {
+    fn validate(&self) -> Result<(), String> {
+        if self.resident_command.len() > MAX_RESIDENT_COMMAND_ARGS {
+            return Err(format!(
+                "containers.agent.resident_command must contain at most {MAX_RESIDENT_COMMAND_ARGS} arguments"
+            ));
+        }
+        if let Some(executable) = self.resident_command.first()
+            && executable.is_empty()
+        {
+            return Err("containers.agent.resident_command[0] must not be empty".to_string());
+        }
+        if let Some(executable) = self.resident_command.first() {
+            if executable.starts_with('-') {
+                return Err(
+                    "containers.agent.resident_command[0] must be an executable, not a supervisor option"
+                        .to_string(),
+                );
+            }
+            if executable
+                .rsplit('/')
+                .next()
+                .is_some_and(|name| name == "openshell-sandbox")
+            {
+                return Err(
+                    "containers.agent.resident_command[0] must not invoke the OpenShell supervisor"
+                        .to_string(),
+                );
+            }
+        }
+        for (index, argument) in self.resident_command.iter().enumerate() {
+            if argument.as_bytes().contains(&0) {
+                return Err(format!(
+                    "containers.agent.resident_command[{index}] must not contain NUL"
+                ));
+            }
+            if argument.len() > MAX_RESIDENT_COMMAND_ARG_BYTES {
+                return Err(format!(
+                    "containers.agent.resident_command[{index}] must contain at most {MAX_RESIDENT_COMMAND_ARG_BYTES} bytes"
+                ));
+            }
+        }
+        for (field, probe) in [
+            ("startup_probe", self.startup_probe.as_ref()),
+            ("readiness_probe", self.readiness_probe.as_ref()),
+            ("liveness_probe", self.liveness_probe.as_ref()),
+        ] {
+            if let Some(probe) = probe {
+                probe.validate(field)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl KubernetesHttpProbeConfig {
+    fn validate(&self, field: &str) -> Result<(), String> {
+        if !self.path.starts_with('/') || self.path.len() > MAX_HTTP_PROBE_PATH_BYTES {
+            return Err(format!(
+                "containers.agent.{field}.path must be an absolute path containing at most {MAX_HTTP_PROBE_PATH_BYTES} bytes"
+            ));
+        }
+        if self.path.bytes().any(|byte| byte.is_ascii_control()) {
+            return Err(format!(
+                "containers.agent.{field}.path must not contain control characters"
+            ));
+        }
+        if self.port == 0 {
+            return Err(format!(
+                "containers.agent.{field}.port must be between 1 and 65535"
+            ));
+        }
+        if self.initial_delay_seconds > MAX_HTTP_PROBE_SECONDS {
+            return Err(format!(
+                "containers.agent.{field}.initial_delay_seconds must be at most {MAX_HTTP_PROBE_SECONDS}"
+            ));
+        }
+        if !(1..=MAX_HTTP_PROBE_SECONDS).contains(&self.period_seconds) {
+            return Err(format!(
+                "containers.agent.{field}.period_seconds must be between 1 and {MAX_HTTP_PROBE_SECONDS}"
+            ));
+        }
+        if !(1..=MAX_HTTP_PROBE_SECONDS).contains(&self.timeout_seconds) {
+            return Err(format!(
+                "containers.agent.{field}.timeout_seconds must be between 1 and {MAX_HTTP_PROBE_SECONDS}"
+            ));
+        }
+        if !(1..=MAX_HTTP_PROBE_FAILURE_THRESHOLD).contains(&self.failure_threshold) {
+            return Err(format!(
+                "containers.agent.{field}.failure_threshold must be between 1 and {MAX_HTTP_PROBE_FAILURE_THRESHOLD}"
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -389,6 +565,65 @@ fn kubernetes_driver_volume_mount_to_k8s(
     mount: &KubernetesDriverVolumeMountConfig,
 ) -> serde_json::Value {
     serde_json::to_value(VolumeMount::from(mount)).expect("VolumeMount serializes to JSON")
+}
+
+fn kubernetes_http_probe_to_k8s(probe: &KubernetesHttpProbeConfig) -> serde_json::Value {
+    serde_json::json!({
+        "httpGet": {
+            "path": probe.path,
+            "port": probe.port,
+            "scheme": "HTTP"
+        },
+        "initialDelaySeconds": probe.initial_delay_seconds,
+        "periodSeconds": probe.period_seconds,
+        "timeoutSeconds": probe.timeout_seconds,
+        "failureThreshold": probe.failure_threshold
+    })
+}
+
+fn apply_agent_runtime_config(
+    pod_template: &mut serde_json::Value,
+    config: &KubernetesContainerDriverConfig,
+) {
+    let Some(containers) = pod_template
+        .pointer_mut("/spec/containers")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return;
+    };
+    let Some(agent) = containers
+        .iter_mut()
+        .find(|container| {
+            container.get("name").and_then(serde_json::Value::as_str) == Some("agent")
+        })
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+
+    if !config.resident_command.is_empty() {
+        let command = agent
+            .get_mut("command")
+            .and_then(serde_json::Value::as_array_mut)
+            .expect("OpenShell topology must install the supervisor command");
+        command.push(serde_json::Value::String("--".to_string()));
+        command.extend(
+            config
+                .resident_command
+                .iter()
+                .cloned()
+                .map(serde_json::Value::String),
+        );
+    }
+    for (field, probe) in [
+        ("startupProbe", config.startup_probe.as_ref()),
+        ("readinessProbe", config.readiness_probe.as_ref()),
+        ("livenessProbe", config.liveness_probe.as_ref()),
+    ] {
+        if let Some(probe) = probe {
+            agent.insert(field.to_string(), kubernetes_http_probe_to_k8s(probe));
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2695,6 +2930,8 @@ fn sandbox_template_to_k8s_with_validated_config(
         }
     }
 
+    apply_agent_runtime_config(&mut result, &driver_config.containers.agent);
+
     // Inject workspace persistence (init container + PVC volume mount) so
     // that /sandbox data survives pod rescheduling. Skipped when the user
     // provides custom storage through driver_config.
@@ -3225,6 +3462,188 @@ mod tests {
         let err = KubernetesSandboxDriverConfig::from_template(&template).unwrap_err();
 
         assert!(err.contains("unknown field"));
+    }
+
+    #[test]
+    fn driver_config_renders_supervised_resident_command_and_http_probes() {
+        let template = SandboxTemplate {
+            driver_config: Some(json_struct(serde_json::json!({
+                "containers": {
+                    "agent": {
+                        "resident_command": [
+                            "/app/.venv/bin/python",
+                            "-m",
+                            "agent_harness",
+                            "serve"
+                        ],
+                        "startup_probe": {
+                            "path": "/health/ready",
+                            "port": 8080,
+                            "period_seconds": 2,
+                            "timeout_seconds": 1,
+                            "failure_threshold": 30
+                        },
+                        "readiness_probe": {
+                            "path": "/health/ready",
+                            "port": 8080,
+                            "period_seconds": 5,
+                            "timeout_seconds": 2,
+                            "failure_threshold": 3
+                        },
+                        "liveness_probe": {
+                            "path": "/health/live",
+                            "port": 8080,
+                            "initial_delay_seconds": 10,
+                            "period_seconds": 10,
+                            "timeout_seconds": 2,
+                            "failure_threshold": 3
+                        }
+                    }
+                }
+            }))),
+            image: "agent-image@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_string(),
+            ..SandboxTemplate::default()
+        };
+        let spec = SandboxSpec {
+            template: Some(template),
+            ..SandboxSpec::default()
+        };
+
+        for params in [
+            SandboxPodParams::default(),
+            SandboxPodParams {
+                topology: SupervisorTopology::Sidecar,
+                supervisor_image: "supervisor-image:latest",
+                supervisor_image_pull_policy: "IfNotPresent",
+                proxy_uid: 2200,
+                sandbox_uid: 1500,
+                sandbox_gid: 1500,
+                ..SandboxPodParams::default()
+            },
+        ] {
+            let cr = sandbox_to_k8s_spec_for_test(Some(&spec), &params);
+            let containers = cr["spec"]["podTemplate"]["spec"]["containers"]
+                .as_array()
+                .expect("containers should render");
+            let agent = containers
+                .iter()
+                .find(|container| container["name"] == "agent")
+                .expect("agent container should render");
+            let command = agent["command"]
+                .as_array()
+                .expect("supervised command should render");
+            assert_eq!(
+                &command[command.len() - 4..],
+                serde_json::json!(["/app/.venv/bin/python", "-m", "agent_harness", "serve"])
+                    .as_array()
+                    .unwrap()
+            );
+            assert_eq!(
+                command[command.len() - 5],
+                "--",
+                "resident argv must be separated from supervisor options"
+            );
+            assert!(
+                command[0]
+                    .as_str()
+                    .is_some_and(|value| value.ends_with("/openshell-sandbox")),
+                "OpenShell supervisor must remain the container entrypoint"
+            );
+            assert_eq!(
+                agent["startupProbe"],
+                serde_json::json!({
+                    "httpGet": {
+                        "path": "/health/ready",
+                        "port": 8080,
+                        "scheme": "HTTP"
+                    },
+                    "initialDelaySeconds": 0,
+                    "periodSeconds": 2,
+                    "timeoutSeconds": 1,
+                    "failureThreshold": 30
+                })
+            );
+            assert_eq!(agent["readinessProbe"]["httpGet"]["path"], "/health/ready");
+            assert_eq!(agent["livenessProbe"]["httpGet"]["path"], "/health/live");
+        }
+    }
+
+    #[test]
+    fn driver_config_rejects_unsafe_resident_commands_and_http_probes() {
+        let too_many_arguments = vec!["argument"; MAX_RESIDENT_COMMAND_ARGS + 1];
+        let cases = [
+            (
+                serde_json::json!({"resident_command": [""]}),
+                "resident_command[0] must not be empty",
+            ),
+            (
+                serde_json::json!({"resident_command": ["--mode=network"]}),
+                "must be an executable, not a supervisor option",
+            ),
+            (
+                serde_json::json!({
+                    "resident_command": ["/opt/openshell/bin/openshell-sandbox"]
+                }),
+                "must not invoke the OpenShell supervisor",
+            ),
+            (
+                serde_json::json!({"resident_command": ["agent\u{0}harness"]}),
+                "must not contain NUL",
+            ),
+            (
+                serde_json::json!({"resident_command": too_many_arguments}),
+                "must contain at most 128 arguments",
+            ),
+            (
+                serde_json::json!({
+                    "readiness_probe": {"path": "health/ready", "port": 8080}
+                }),
+                "path must be an absolute path",
+            ),
+            (
+                serde_json::json!({
+                    "readiness_probe": {"path": "/health/ready", "port": 0}
+                }),
+                "port must be between 1 and 65535",
+            ),
+            (
+                serde_json::json!({
+                    "readiness_probe": {
+                        "path": "/health/ready",
+                        "port": 8080,
+                        "period_seconds": 0
+                    }
+                }),
+                "period_seconds must be between 1 and 3600",
+            ),
+            (
+                serde_json::json!({
+                    "readiness_probe": {
+                        "path": "/health/ready",
+                        "port": 8080,
+                        "failure_threshold": 0
+                    }
+                }),
+                "failure_threshold must be between 1 and 100",
+            ),
+        ];
+
+        for (agent_config, expected) in cases {
+            let template = SandboxTemplate {
+                driver_config: Some(json_struct(serde_json::json!({
+                    "containers": {"agent": agent_config}
+                }))),
+                ..SandboxTemplate::default()
+            };
+
+            let err = KubernetesSandboxDriverConfig::from_template(&template).unwrap_err();
+
+            assert!(
+                err.contains(expected),
+                "{err:?} did not contain {expected:?}"
+            );
+        }
     }
 
     #[test]
