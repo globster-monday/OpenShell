@@ -39,12 +39,13 @@ pub mod secrets;
 pub mod settings;
 pub mod telemetry;
 pub mod time;
+pub mod transport_errors;
 
 pub use config::{
     ComputeDriverKind, Config, GatewayAuthConfig, GatewayInterceptorBindingOverride,
     GatewayInterceptorBindingPolicy, GatewayInterceptorConfig, GatewayInterceptorFailurePolicy,
     GatewayInterceptorPhaseConfig, GatewayJwtConfig, GatewayProviderProfileSourceConfig,
-    MtlsAuthConfig, OidcConfig, TlsConfig,
+    MtlsAuthConfig, OidcConfig, PolicyValidationFailureMode, TlsConfig,
 };
 pub use error::{ComputeDriverError, Error, Result};
 pub use metadata::{

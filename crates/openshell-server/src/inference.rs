@@ -17,7 +17,6 @@ use openshell_core::{ObjectId, ObjectLabels, ObjectWorkspace};
 use openshell_providers::normalize_provider_type;
 use openshell_router::config::ResolvedRoute as RouterResolvedRoute;
 use openshell_router::{ValidationFailureKind, verify_backend_endpoint};
-use openshell_server_macros::rpc_authz;
 use prost::Message as _;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -26,6 +25,7 @@ use tonic::{Request, Response, Status};
 
 use crate::{
     ServerState,
+    auth::workspace_authz::{MinWorkspaceRole, authorize_workspace},
     persistence::{ObjectName, ObjectType, Store, WriteCondition, current_time_ms},
 };
 
@@ -62,10 +62,8 @@ impl ObjectType for InferenceRoute {
     }
 }
 
-#[rpc_authz(service = "openshell.inference.v1.Inference")]
 #[tonic::async_trait]
 impl Inference for InferenceService {
-    #[rpc_auth(auth = "sandbox")]
     async fn get_inference_bundle(
         &self,
         request: Request<GetInferenceBundleRequest>,
@@ -88,14 +86,22 @@ impl Inference for InferenceService {
             .map(Response::new)
     }
 
-    #[rpc_auth(auth = "bearer", scope = "inference:write", role = "admin")]
     async fn set_inference_route(
         &self,
         request: Request<SetInferenceRouteRequest>,
     ) -> Result<Response<SetInferenceRouteResponse>, Status> {
+        let principal = crate::grpc::extract_principal(&request)?;
         let req = request.into_inner();
+        let authz = authorize_workspace(
+            &self.state.store,
+            &self.state.admin_role,
+            &principal,
+            &req.workspace,
+            MinWorkspaceRole::Admin,
+        )
+        .await?;
         let workspace =
-            crate::grpc::workspace::resolve_workspace(self.state.store.as_ref(), &req.workspace)
+            crate::grpc::workspace::resolve_workspace(self.state.store.as_ref(), &authz.workspace)
                 .await?
                 .ensure_active()?;
         let route_name = effective_route_name(&req.route_name)?;
@@ -129,14 +135,22 @@ impl Inference for InferenceService {
         }))
     }
 
-    #[rpc_auth(auth = "bearer", scope = "inference:read", role = "user")]
     async fn get_inference_route(
         &self,
         request: Request<GetInferenceRouteRequest>,
     ) -> Result<Response<GetInferenceRouteResponse>, Status> {
+        let principal = crate::grpc::extract_principal(&request)?;
         let req = request.into_inner();
+        let authz = authorize_workspace(
+            &self.state.store,
+            &self.state.admin_role,
+            &principal,
+            &req.workspace,
+            MinWorkspaceRole::User,
+        )
+        .await?;
         let workspace =
-            crate::grpc::workspace::resolve_workspace(self.state.store.as_ref(), &req.workspace)
+            crate::grpc::workspace::resolve_workspace(self.state.store.as_ref(), &authz.workspace)
                 .await?
                 .name;
         let route_name = effective_route_name(&req.route_name)?;
@@ -173,14 +187,22 @@ impl Inference for InferenceService {
         }))
     }
 
-    #[rpc_auth(auth = "bearer", scope = "inference:write", role = "admin")]
     async fn delete_inference_route(
         &self,
         request: Request<DeleteInferenceRouteRequest>,
     ) -> Result<Response<DeleteInferenceRouteResponse>, Status> {
+        let principal = crate::grpc::extract_principal(&request)?;
         let req = request.into_inner();
+        let authz = authorize_workspace(
+            &self.state.store,
+            &self.state.admin_role,
+            &principal,
+            &req.workspace,
+            MinWorkspaceRole::Admin,
+        )
+        .await?;
         let workspace =
-            crate::grpc::workspace::resolve_workspace(self.state.store.as_ref(), &req.workspace)
+            crate::grpc::workspace::resolve_workspace(self.state.store.as_ref(), &authz.workspace)
                 .await?
                 .name;
         let route_name = effective_route_name(&req.route_name)?;
@@ -627,11 +649,11 @@ fn resolve_vertex_ai_route(
     // protocol and path contract, but only for the OpenAI-compatible Vertex surface.
     // Anthropic-on-Vertex needs model-path shaping and body adaptation that a fully
     // caller-controlled URL cannot safely preserve.
-    if let Some(base_url) = config
-        .get(profile.base_url_config_keys[0])
-        .or_else(|| config.get(profile.base_url_config_keys[1]))
+    if let Some(base_url) = profile
+        .base_url_config_keys
+        .iter()
+        .find_map(|key| config.get(*key).filter(|v| !v.trim().is_empty()))
         .map(String::as_str)
-        .filter(|v| !v.trim().is_empty())
     {
         if is_anthropic {
             return Err(Status::invalid_argument(
@@ -1131,6 +1153,65 @@ mod tests {
             config: std::iter::once((base_url_key.to_string(), base_url.to_string())).collect(),
             ..make_provider(name, provider_type, key_name, key_value)
         }
+    }
+
+    #[test]
+    fn resolve_vertex_ai_route_handles_empty_base_url_keys() {
+        let config = HashMap::new();
+        let profile = openshell_core::inference::InferenceProviderProfile {
+            provider_type: "google_vertex_ai",
+            default_base_url: "https://example.com",
+            protocols: &[],
+            credential_key_names: &[],
+            base_url_config_keys: &[],
+            auth: openshell_core::inference::AuthHeader::Bearer,
+            default_headers: &[],
+            passthrough_headers: &[],
+        };
+        let result = resolve_vertex_ai_route(&config, "model-id", "route", "api-key", &profile);
+        // Empty base_url_config_keys must not panic. The route still errors because
+        // the minimal Vertex config is missing, so we only assert reachability.
+        assert!(
+            result.is_err(),
+            "expected missing config to error, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_vertex_ai_route_skips_blank_preferred_for_fallback() {
+        let mut config = HashMap::new();
+        config.insert("GOOGLE_VERTEX_AI_BASE_URL".to_string(), "   ".to_string());
+        config.insert(
+            "VERTEX_AI_BASE_URL".to_string(),
+            "https://us-central1-aiplatform.googleapis.com".to_string(),
+        );
+        config.insert(
+            VERTEX_AI_PROJECT_ID_KEY.to_string(),
+            "my-project".to_string(),
+        );
+        config.insert(VERTEX_AI_REGION_KEY.to_string(), "us-central1".to_string());
+
+        let profile = openshell_core::inference::InferenceProviderProfile {
+            provider_type: "google-vertex-ai",
+            default_base_url: "",
+            protocols: &[],
+            credential_key_names: &[],
+            base_url_config_keys: &["GOOGLE_VERTEX_AI_BASE_URL", "VERTEX_AI_BASE_URL"],
+            auth: openshell_core::inference::AuthHeader::Bearer,
+            default_headers: &[],
+            passthrough_headers: &[],
+        };
+
+        let result = resolve_vertex_ai_route(&config, "model-id", "route", "api-key", &profile);
+        assert!(
+            result.is_ok(),
+            "blank preferred key should fall back to valid alias: {result:?}"
+        );
+        let route = result.unwrap();
+        assert_eq!(
+            route.endpoint,
+            "https://us-central1-aiplatform.googleapis.com"
+        );
     }
 
     #[test]
@@ -3351,6 +3432,77 @@ mod tests {
         assert!(
             bundle.routes.is_empty(),
             "bundle should be empty after route deletion"
+        );
+    }
+
+    /// Non-member callers must receive `PERMISSION_DENIED` — not `NOT_FOUND` —
+    /// when targeting a workspace that does not exist. Returning `NOT_FOUND`
+    /// would create a CWE-203 workspace-name oracle.
+    #[tokio::test]
+    async fn non_member_gets_permission_denied_not_workspace_oracle() {
+        use crate::grpc::test_support::test_server_state;
+        use crate::inference::InferenceService;
+        use openshell_core::proto::inference_server::Inference;
+
+        fn non_member_request<T>(inner: T) -> Request<T> {
+            let mut req = Request::new(inner);
+            req.extensions_mut().insert(Principal::User(UserPrincipal {
+                identity: Identity {
+                    subject: "non-member".to_string(),
+                    display_name: None,
+                    roles: vec![],
+                    scopes: vec![],
+                    provider: IdentityProvider::Oidc,
+                },
+            }));
+            req
+        }
+
+        let mut state = test_server_state().await;
+        Arc::get_mut(&mut state).unwrap().admin_role = "openshell-admin".to_string();
+
+        let svc = InferenceService::new(state.clone());
+
+        let err = svc
+            .set_inference_route(non_member_request(SetInferenceRouteRequest {
+                workspace: "no-such-ws".into(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.code(),
+            tonic::Code::PermissionDenied,
+            "set_inference_route should return PermissionDenied, got {:?}",
+            err.code()
+        );
+
+        let err = svc
+            .get_inference_route(non_member_request(GetInferenceRouteRequest {
+                workspace: "no-such-ws".into(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.code(),
+            tonic::Code::PermissionDenied,
+            "get_inference_route should return PermissionDenied, got {:?}",
+            err.code()
+        );
+
+        let err = svc
+            .delete_inference_route(non_member_request(DeleteInferenceRouteRequest {
+                workspace: "no-such-ws".into(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.code(),
+            tonic::Code::PermissionDenied,
+            "delete_inference_route should return PermissionDenied, got {:?}",
+            err.code()
         );
     }
 }

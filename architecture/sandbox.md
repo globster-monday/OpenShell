@@ -32,7 +32,7 @@ only when the set is already empty; any other outcome fails the spawn.
 4. It starts the policy proxy and local SSH server.
 5. It opens a supervisor session back to the gateway for connect, exec, file
    sync, config polling, and log push.
-6. It launches the agent command as the restricted sandbox user.
+6. It launches the agent command as the resolved restricted identity.
 
 ## Isolation Layers
 
@@ -57,6 +57,21 @@ unsafe internal destinations, and evaluates the active policy. On Linux, it
 maps an accepted proxy connection back to the workload socket by matching the
 complete local-to-remote TCP tuple before resolving every process that owns the
 socket inode.
+
+CONNECT and absolute-form forward HTTP are explicit-proxy adapters over the same
+egress pipeline. Each adapter normalizes its request into an egress intent, and
+the shared authorization result carries the process evidence used by destination
+validation and relay selection. During the compatibility migration, endpoint
+state is hydrated at the adapters' existing policy query points; it is not yet
+one atomic, generation-consistent authorization result. Destination validation
+returns an unopened connector so adapters retain their existing response and
+upstream-dial timing. CONNECT prepares a generation-pinned relay context before
+entering shared TLS-terminated or plaintext HTTP relays; non-HTTP traffic uses
+the shared raw byte relay after the existing adapter gates. Forward HTTP retains
+its guarded single-request relay while sharing authorization, request context,
+policy-pinning, and destination boundaries.
+Adapter-specific response and OCSF event shapes remain at the protocol boundary.
+
 For inspected HTTP traffic, the proxy can enforce REST method/path rules,
 WebSocket upgrade and text-message rules, GraphQL operation rules, and
 MCP method, tool, and supported params rules or generic JSON-RPC method rules
@@ -280,6 +295,15 @@ revision it acknowledges, so a successfully constructed initial policy never
 remains `Pending`. If the first poll returns a different revision, the supervisor
 processes it through the normal reload path instead of treating it as already
 loaded.
+
+A newer sandbox-scoped revision can carry the same non-empty effective policy
+hash as the currently loaded revision, for example when provenance changes
+without changing enforcement content. The supervisor acknowledges that newer
+revision without reloading identical policy. If the revision also requires
+middleware or policy-runtime reconciliation, acknowledgement waits until that
+reconciliation succeeds. Global policies, local overrides, equal or older
+versions, and different hashes do not use this shortcut. Success telemetry is
+emitted only after the gateway accepts the resulting loaded-status report.
 
 Policy status delivery uses a FIFO background worker. Retryable delivery
 failures retain the ordered update and retry with capped exponential backoff;

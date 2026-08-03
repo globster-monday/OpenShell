@@ -237,7 +237,10 @@ Only needed for the **Moderate** and **Full** tiers. Translate API path paramete
 | `/api/v1/models/{model_id}/versions/{version}` | `/api/v1/models/*/versions/*` |
 | All sub-paths under `/api/v1/` | `/api/v1/**` |
 
-Remember: `*` does not cross `/` boundaries. Use `**` for recursive matching across path segments.
+Path matching uses the runtime `glob` engine. Both `*` and `**` may cross `/`
+boundaries; `?` matches one character, and bracket classes such as `[0-9]` and
+`[!0]` are supported. Prefer segment-shaped patterns such as
+`/repos/*/issues` for readability, but do not rely on `*` to stop at `/`.
 
 ### Building the Explicit Rules List
 
@@ -439,7 +442,7 @@ The policy needs to go somewhere. Determine which mode applies:
 
 2. **Check for conflicts**:
    - Does a policy with the same key already exist? If so, ask the user whether to **replace** it, **merge** new endpoints/binaries into it, or use a different key.
-   - Does an existing policy already cover the same host:port? Warn the user — overlapping endpoint coverage across policies causes OPA evaluation errors (complete rule conflict).
+   - Does an existing endpoint selector overlap the new selector? Compatible overlaps are allowed and can intentionally aggregate allow and deny rules. Reject or revise equally specific overlaps that disagree on connection or request-processing metadata, including TLS, destination constraints, protocol/parser behavior, enforcement, or credential handling. A more-specific path selector may override broader request-processing metadata.
 
 3. **Apply the change**:
    - **Adding a new policy**: Insert the new policy block under `network_policies`, maintaining the file's existing indentation and style.
@@ -473,15 +476,17 @@ filesystem_policy:
 landlock:
   compatibility: best_effort
 
-process:
-  run_as_user: sandbox
-  run_as_group: sandbox
-
 network_policies:
   # <generated policies go here>
 ```
 
-The `filesystem_policy`, `landlock`, and `process` sections above are sensible defaults. Tell the user these are defaults and may need adjustment for their environment. Gateway inference is configured separately through `openshell inference set/get`. The generated `network_policies` block is the primary output.
+The `filesystem_policy` and `landlock` sections above are sensible defaults.
+Process identity is omitted so the selected compute driver can choose it. For
+Docker and Podman, each omitted identity field falls back to the image's OCI
+`USER`. Tell the user these are defaults and may need adjustment for their
+environment. Gateway inference is configured separately through `openshell
+inference set/get`. The generated `network_policies` block is the primary
+output.
 
 If the user provides a file path, write to it. Otherwise, ask where to place it. A common convention is a project-local policy file (e.g., `sandbox-policy.yaml`) passed to `openshell sandbox create --policy <path>` or set via the `OPENSHELL_SANDBOX_POLICY` env var.
 

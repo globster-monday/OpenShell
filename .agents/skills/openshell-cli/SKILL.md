@@ -52,12 +52,15 @@ Use an `http://` endpoint only for trusted local port-forwarding or a protected 
 
 ```bash
 openshell status
+openshell whoami
 ```
 
 Confirm the gateway is reachable, authentication is valid or not required, and
 the output shows a version. `Status: Connected` only proves the public health
 endpoint is reachable; inspect the separate `Authentication` line before
-running protected commands.
+running protected commands. `openshell whoami` reports the identity validated
+by the gateway, including the subject an administrator uses for workspace
+membership. Add `--output json` for automation.
 
 ### Step 3: Create a sandbox
 
@@ -351,6 +354,13 @@ Edit `current-policy.yaml` to allow the blocked actions. **For policy content au
 openshell policy set dev --policy current-policy.yaml --wait
 ```
 
+The gateway validates the complete effective candidate—including attached
+provider-profile policy—before it stores a direct update, incremental merge,
+approved proposal, provider attachment, or profile update that affects attached
+sandboxes. An ambiguity failure returns `FAILED_PRECONDITION`; the rejected
+candidate does not create a policy revision or partially update affected
+sandboxes. Fix the conflicting endpoint selectors and submit again.
+
 The `--wait` flag blocks until the sandbox confirms the policy is loaded (polls every second). Exit codes:
 - **0**: Policy loaded successfully
 - **1**: Policy load failed
@@ -421,6 +431,12 @@ openshell sandbox create --from ./Dockerfile --name my-app
 The `--from` flag accepts a Dockerfile path, a directory containing a Dockerfile, a full image reference such as `myregistry.com/img:tag`, or a community sandbox name such as `ollama`.
 
 Local Dockerfile and directory builds require a local gateway because the CLI builds through the local Docker daemon. Use a registry image reference for remote gateways. Bare community names resolve under `ghcr.io/nvidia/openshell-community/sandboxes` unless `OPENSHELL_COMMUNITY_REGISTRY` overrides the prefix.
+
+For Docker and Podman gateways, custom images should declare a non-root OCI
+`USER`. Each explicit `process.run_as_user` or `process.run_as_group` policy
+field wins independently; omitted fields fall back to the image declaration.
+An image with no `USER` fails before readiness unless policy supplies both
+fields.
 
 ### Forward ports
 
@@ -569,6 +585,13 @@ openshell settings set --global --key providers_v2_enabled --value true
 
 Global mutations prompt for confirmation. Use `--yes` only in reviewed automation.
 
+`policy_validation_failure_mode` is gateway startup configuration, not a
+mutable `openshell settings` key. Set it under `[openshell.gateway]` in
+`gateway.toml` and restart the gateway. The security-first default is
+`fail_closed`; `retain_last_valid` is an explicit availability tradeoff. OCSF
+configuration events state whether the previous generation is active after a
+runtime validation failure.
+
 ## Workflow 10: Service Access
 
 Use `forward` for local access and `service` for a gateway-managed HTTP endpoint:
@@ -619,6 +642,7 @@ $ openshell sandbox upload --help
 |------|---------|
 | Register local port-forwarded gateway | `openshell gateway add http://127.0.0.1:8080 --local --name local` |
 | Check gateway health and authentication | `openshell status` |
+| Show authenticated identity and subject | `openshell whoami` |
 | List/switch gateways | `openshell gateway select [name]` |
 | Connect directly to a gateway | `openshell --gateway-endpoint <url> status` |
 | Create sandbox (interactive) | `openshell sandbox create` |

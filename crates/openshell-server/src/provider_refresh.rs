@@ -769,6 +769,7 @@ async fn mint_aws_sts_assume_role(
         DEFAULT_MAX_LIFETIME_SECONDS
     };
     let max_lifetime = i32::try_from(max_lifetime_i64.min(i64::from(i32::MAX))).unwrap_or(i32::MAX);
+    let max_lifetime_ms = i64::from(max_lifetime).saturating_mul(1000);
 
     let mut req = client
         .assume_role()
@@ -794,11 +795,8 @@ async fn mint_aws_sts_assume_role(
     let session_token = creds.session_token().to_string();
 
     let now_ms = current_time_ms();
-    let expires_at_ms = creds
-        .expiration()
-        .to_millis()
-        .unwrap_or_else(|_| now_ms + max_lifetime_i64 * 1000);
-    let max_expires = now_ms + max_lifetime_i64 * 1000;
+    let max_expires = now_ms.saturating_add(max_lifetime_ms);
+    let expires_at_ms = creds.expiration().to_millis().unwrap_or(max_expires);
     let expires_at_ms = expires_at_ms.min(max_expires);
 
     // Map STS response fields to the env keys the profile bound to each semantic
@@ -1002,9 +1000,20 @@ pub fn spawn_refresh_worker(state: std::sync::Arc<crate::ServerState>, interval:
     });
 }
 
+#[tracing::instrument(
+    name = "refresh",
+    skip_all,
+    fields(
+        otel.name = "refresh.provider_credentials",
+        watched_count = tracing::field::Empty,
+        due_count = tracing::field::Empty,
+    )
+)]
 async fn run_refresh_worker_tick(store: &Store) -> Result<(), Status> {
     let now_ms = current_time_ms();
-    let states = list_all_refresh_states(store).await?;
+    let states = list_all_refresh_states(store).await.inspect_err(|_| {
+        crate::otel_tracing::mark_error(&tracing::Span::current());
+    })?;
     let watched_count = states.len();
     let due_count = states
         .iter()
@@ -1014,6 +1023,9 @@ async fn run_refresh_worker_tick(store: &Store) -> Result<(), Status> {
         .iter()
         .filter(|state| state.status == "rotation_requested")
         .count();
+    let span = tracing::Span::current();
+    span.record("watched_count", watched_count);
+    span.record("due_count", due_count);
     info!(
         watched_count,
         due_count, rotation_requested_count, "provider credential refresh worker sweep"
@@ -1511,12 +1523,55 @@ mod tests {
         );
     }
 
+    /// The worker ticks on a timer with no inbound request, so without a span
+    /// of its own its store reads export as anonymous single-span traces.
+    #[tokio::test]
+    async fn refresh_worker_ticks_are_roots_and_store_operations_have_parents() {
+        use crate::otel_tracing::test_exporter;
+
+        let store = test_store().await;
+
+        let traced = test_exporter::install_traced();
+        run_refresh_worker_tick(&store).await.unwrap();
+
+        let spans = traced.finished_spans();
+        let root = spans
+            .iter()
+            .find(|s| s.name == "refresh.provider_credentials")
+            .unwrap_or_else(|| {
+                panic!(
+                    "the tick records a span of its own, got {:?}",
+                    spans.iter().map(|s| &s.name).collect::<Vec<_>>()
+                )
+            });
+
+        test_exporter::assert_is_root(root);
+        let store_span = spans
+            .iter()
+            .find(|span| {
+                span.name.starts_with("store.")
+                    && span.span_context.trace_id() == root.span_context.trace_id()
+            })
+            .expect("the tick records its store operation");
+        test_exporter::assert_has_parent(store_span);
+    }
+
     #[test]
     fn refresh_strategy_name_includes_aws_sts() {
         assert_eq!(
             refresh_strategy_name(ProviderCredentialRefreshStrategy::AwsStsAssumeRole as i32),
             "aws_sts_assume_role"
         );
+    }
+
+    #[test]
+    fn aws_sts_max_expires_saturates_on_saturated_clock() {
+        assert_eq!(i64::MAX.saturating_add(3_600_000), i64::MAX);
+        let now_ms = i64::MAX - 1_000;
+        let max_lifetime_ms = 3_600_000;
+        let max_expires = now_ms.saturating_add(max_lifetime_ms);
+        assert_eq!(max_expires, i64::MAX);
+        assert!(max_expires >= now_ms);
     }
 
     #[tokio::test]

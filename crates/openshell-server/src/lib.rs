@@ -29,11 +29,13 @@ pub mod cli;
 mod compute;
 pub mod config_file;
 mod defaults;
+mod gateway_listener;
 mod grpc;
 mod http;
 mod inference;
 mod middleware;
 mod multiplex;
+mod otel_tracing;
 mod persistence;
 pub(crate) mod policy_store;
 mod provider_profile_sources;
@@ -51,6 +53,7 @@ mod tls;
 #[cfg(test)]
 pub(crate) mod tls_test_utils;
 pub mod tracing_bus;
+mod tracing_setup;
 mod ws_tunnel;
 
 use metrics_exporter_prometheus::PrometheusBuilder;
@@ -70,7 +73,12 @@ use tracing::{debug, error, info, warn};
 #[cfg(test)]
 pub(crate) static TEST_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
+/// Serializes tests that assert on captured spans, which share one exporter.
+#[cfg(test)]
+pub(crate) static TEST_TRACING_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
 use compute::ComputeRuntime;
+use gateway_listener::{BoundGatewayListener, GatewayListenerScope, bind_gateway_listeners};
 pub use grpc::OpenShellService;
 pub use http::{health_router, http_router, metrics_router, service_http_router};
 pub use multiplex::{MultiplexService, MultiplexedService};
@@ -161,6 +169,11 @@ pub struct ServerState {
     /// Gateway-local provider profile sources. User-imported profiles are read
     /// on demand when the user source is configured.
     pub(crate) provider_profile_sources: provider_profile_sources::ProviderProfileSources,
+
+    /// OIDC admin role name for workspace-level authorization.
+    /// Empty when OIDC is not configured — `authorize_workspace()` treats
+    /// every authenticated user as Platform Admin in that case.
+    pub admin_role: String,
 }
 
 fn is_benign_tls_handshake_failure(error: &std::io::Error) -> bool {
@@ -171,12 +184,7 @@ fn is_benign_tls_handshake_failure(error: &std::io::Error) -> bool {
 }
 
 fn is_benign_connection_close(error: &(dyn std::error::Error + 'static)) -> bool {
-    let msg = error.to_string();
-    msg.contains("connection closed")
-        || msg.contains("connection reset")
-        || msg.contains("connection error")
-        || msg.contains("error reading a body from connection")
-        || msg.contains("broken pipe")
+    openshell_core::transport_errors::is_expected_transport_close_error(error)
 }
 
 impl ServerState {
@@ -194,6 +202,10 @@ impl ServerState {
         oidc_cache: Option<Arc<auth::oidc::JwksCache>>,
     ) -> Self {
         let grpc_rate_limiter = multiplex::GrpcRateLimiter::from_config(&config);
+        let admin_role = config
+            .oidc
+            .as_ref()
+            .map_or_else(String::new, |oidc| oidc.admin_role.clone());
         Self {
             config,
             store,
@@ -215,6 +227,7 @@ impl ServerState {
             gateway_interceptors: None,
             provider_profile_sources:
                 provider_profile_sources::ProviderProfileSources::with_default_sources(),
+            admin_role,
         }
     }
 }
@@ -235,6 +248,9 @@ pub(crate) async fn run_server(
         config_file,
         guest_tls,
     } = startup;
+
+    auth::descriptor_authz::init()
+        .map_err(|error| Error::config(format!("invalid gRPC authorization metadata: {error}")))?;
 
     let database_url = config.database_url.trim();
     if database_url.is_empty() {
@@ -431,6 +447,12 @@ pub(crate) async fn run_server(
     // snapshot on its first poll.
     ensure_default_workspace(&store).await?;
 
+    let gateway_listeners = bind_gateway_listeners(
+        config.bind_address,
+        state.compute.gateway_listener_requirements(),
+    )
+    .await?;
+
     if let Err(err) = state.compute.resume_persisted_sandboxes().await {
         warn!(error = %err, "Failed to resume persisted sandboxes during startup");
     }
@@ -442,18 +464,6 @@ pub(crate) async fn run_server(
 
     // Create the multiplexed service
     let service = MultiplexService::new(state.clone());
-
-    let gateway_listener_addresses =
-        gateway_listener_addresses(config.bind_address, state.compute.gateway_bind_addresses());
-    let mut gateway_listeners = Vec::with_capacity(gateway_listener_addresses.len());
-    for address in gateway_listener_addresses {
-        let listener = TcpListener::bind(address)
-            .await
-            .map_err(|e| Error::transport(format!("failed to bind to {address}: {e}")))?;
-        let local_addr = listener.local_addr().unwrap_or(address);
-        info!(address = %local_addr, "Server listening");
-        gateway_listeners.push((listener, local_addr));
-    }
 
     // Bind the unauthenticated health endpoint on a separate port when configured.
     if let Some(health_bind_address) = config.health_bind_address {
@@ -523,10 +533,9 @@ pub(crate) async fn run_server(
 
     let mut listener_tasks = Vec::with_capacity(gateway_listeners.len());
     let enable_loopback_service_http = config.service_routing.enable_loopback_service_http;
-    for (listener, listen_addr) in gateway_listeners {
+    for listener in gateway_listeners {
         listener_tasks.push(tokio::spawn(serve_gateway_listener(
             listener,
-            listen_addr,
             service.clone(),
             tls_acceptor.clone(),
             enable_loopback_service_http,
@@ -553,45 +562,16 @@ pub(crate) async fn run_server(
     Ok(())
 }
 
-fn gateway_listener_addresses(
-    bind_address: SocketAddr,
-    extra_addresses: &[SocketAddr],
-) -> Vec<SocketAddr> {
-    let mut addresses = vec![bind_address];
-    for address in extra_addresses {
-        if !addresses
-            .iter()
-            .any(|existing| listener_covers(*existing, *address))
-        {
-            addresses.push(*address);
-        }
-    }
-    addresses
-}
-
-fn listener_covers(existing: SocketAddr, requested: SocketAddr) -> bool {
-    if existing == requested {
-        return true;
-    }
-    if existing.port() != requested.port() {
-        return false;
-    }
-
-    match (existing.ip(), requested.ip()) {
-        (std::net::IpAddr::V4(existing), std::net::IpAddr::V4(_)) => existing.is_unspecified(),
-        (std::net::IpAddr::V6(existing), std::net::IpAddr::V6(_)) => existing.is_unspecified(),
-        _ => false,
-    }
-}
-
 async fn serve_gateway_listener(
-    listener: TcpListener,
-    listen_addr: SocketAddr,
+    bound_listener: BoundGatewayListener,
     service: MultiplexService,
     tls_acceptor: Option<TlsAcceptor>,
     enable_loopback_service_http: bool,
     mut shutdown: watch::Receiver<bool>,
 ) {
+    let BoundGatewayListener { listener, spec } = bound_listener;
+    let listen_addr = spec.address;
+
     loop {
         let accepted = tokio::select! {
             changed = shutdown.changed() => {
@@ -610,11 +590,19 @@ async fn serve_gateway_listener(
                 continue;
             }
         };
+        let listener_scope = match stream.local_addr() {
+            Ok(local_addr) => spec.scope_for_local_addr(local_addr),
+            Err(e) => {
+                debug!(error = %e, client = %addr, listen = %listen_addr, "Failed to inspect accepted local address");
+                spec.scope
+            }
+        };
 
         spawn_gateway_connection(
             stream,
             addr,
             listen_addr,
+            listener_scope,
             service.clone(),
             tls_acceptor.clone(),
             enable_loopback_service_http,
@@ -675,14 +663,19 @@ fn allow_plaintext_service_http(
     enabled: bool,
     listen_addr: SocketAddr,
     peer_addr: SocketAddr,
+    listener_scope: GatewayListenerScope,
 ) -> bool {
-    enabled && listen_addr.ip().is_loopback() && peer_addr.ip().is_loopback()
+    enabled
+        && matches!(listener_scope, GatewayListenerScope::Primary)
+        && listen_addr.ip().is_loopback()
+        && peer_addr.ip().is_loopback()
 }
 
 fn spawn_gateway_connection(
     stream: TcpStream,
     addr: SocketAddr,
     listen_addr: SocketAddr,
+    listener_scope: GatewayListenerScope,
     service: MultiplexService,
     tls_acceptor: Option<TlsAcceptor>,
     enable_loopback_service_http: bool,
@@ -695,9 +688,13 @@ fn spawn_gateway_connection(
                         enable_loopback_service_http,
                         listen_addr,
                         addr,
+                        listener_scope,
                     ) =>
                 {
-                    if let Err(e) = service.serve_service_http(stream).await {
+                    if let Err(e) = service
+                        .serve_service_http_on_listener(stream, listener_scope)
+                        .await
+                    {
                         if is_benign_connection_close(e.as_ref()) {
                             debug!(error = %e, client = %addr, listen = %listen_addr, "Plaintext service HTTP connection closed");
                         } else {
@@ -706,7 +703,12 @@ fn spawn_gateway_connection(
                     }
                 }
                 Ok(ConnectionProtocol::PlainHttp) => {
-                    warn!(client = %addr, listen = %listen_addr, "Rejected plaintext HTTP on non-loopback gateway listener");
+                    warn!(
+                        client = %addr,
+                        listen = %listen_addr,
+                        scope = ?listener_scope,
+                        "Rejected plaintext HTTP on gateway listener"
+                    );
                 }
                 Ok(ConnectionProtocol::Tls | ConnectionProtocol::Unknown) => {
                     // acceptor.acceptor() snapshots the current TLS config;
@@ -716,7 +718,11 @@ fn spawn_gateway_connection(
                         Ok(tls_stream) => {
                             let peer_identity = multiplex::extract_peer_identity(&tls_stream);
                             if let Err(e) = service
-                                .serve_with_peer_identity(tls_stream, peer_identity)
+                                .serve_with_peer_identity_on_listener(
+                                    tls_stream,
+                                    peer_identity,
+                                    listener_scope,
+                                )
                                 .await
                             {
                                 if is_benign_connection_close(e.as_ref()) {
@@ -742,7 +748,7 @@ fn spawn_gateway_connection(
         });
     } else {
         tokio::spawn(async move {
-            if let Err(e) = service.serve(stream).await {
+            if let Err(e) = service.serve_on_listener(stream, listener_scope).await {
                 if is_benign_connection_close(e.as_ref()) {
                     debug!(error = %e, client = %addr, "Connection closed");
                 } else {
@@ -1019,10 +1025,11 @@ pub(crate) async fn ensure_default_workspace(store: &Store) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ConfiguredComputeDriver, ConnectionProtocol, MultiplexService, ServerState, TlsAcceptor,
-        allow_plaintext_service_http, classify_initial_bytes, configured_compute_driver,
-        gateway_listener_addresses, is_benign_tls_handshake_failure,
-        kubernetes_sandbox_jwt_expiry_disabled, serve_gateway_listener,
+        BoundGatewayListener, ConfiguredComputeDriver, ConnectionProtocol, GatewayListenerScope,
+        MultiplexService, ServerState, TlsAcceptor, allow_plaintext_service_http,
+        bind_gateway_listeners, classify_initial_bytes, configured_compute_driver,
+        is_benign_tls_handshake_failure, kubernetes_sandbox_jwt_expiry_disabled,
+        serve_gateway_listener,
     };
     use openshell_core::{
         ComputeDriverKind, Config,
@@ -1030,14 +1037,21 @@ mod tests {
     };
     use std::io::{Error, ErrorKind};
     use std::net::SocketAddr;
-    use std::sync::Arc;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
     use std::time::Duration;
     use tempfile::{TempDir, tempdir};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::watch;
 
-    use crate::tls_test_utils::{generate_test_certs_with_ca, install_rustls_provider};
+    use crate::{
+        compute::GatewayListenerRequirement,
+        gateway_listener::GatewayListenerSpec,
+        tls_test_utils::{generate_test_certs_with_ca, install_rustls_provider},
+    };
 
     fn test_driver_startup<'a>(
         config: &'a Config,
@@ -1113,8 +1127,10 @@ mod tests {
         let (tls_dir, tls_acceptor) = test_tls_acceptor();
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let handle = tokio::spawn(serve_gateway_listener(
-            listener,
-            listen_addr,
+            BoundGatewayListener {
+                listener,
+                spec: GatewayListenerSpec::new(listen_addr, GatewayListenerScope::Primary),
+            },
             service,
             Some(tls_acceptor),
             enable_loopback_service_http,
@@ -1211,11 +1227,23 @@ mod tests {
         let peer: SocketAddr = "127.0.0.1:54000".parse().unwrap();
         let wildcard: SocketAddr = "0.0.0.0:8080".parse().unwrap();
         let remote_peer: SocketAddr = "192.0.2.10:54000".parse().unwrap();
+        let primary = GatewayListenerScope::Primary;
+        let callback = GatewayListenerScope::ComputeDriverCallback;
 
-        assert!(allow_plaintext_service_http(true, loopback, peer));
-        assert!(!allow_plaintext_service_http(false, loopback, peer));
-        assert!(!allow_plaintext_service_http(true, wildcard, peer));
-        assert!(!allow_plaintext_service_http(true, loopback, remote_peer));
+        assert!(allow_plaintext_service_http(true, loopback, peer, primary));
+        assert!(!allow_plaintext_service_http(
+            false, loopback, peer, primary
+        ));
+        assert!(!allow_plaintext_service_http(true, wildcard, peer, primary));
+        assert!(!allow_plaintext_service_http(
+            true,
+            loopback,
+            remote_peer,
+            primary
+        ));
+        assert!(!allow_plaintext_service_http(
+            true, loopback, peer, callback
+        ));
     }
 
     #[tokio::test]
@@ -1492,25 +1520,39 @@ mod tests {
         assert!(!kubernetes_sandbox_jwt_expiry_disabled(&Config::new(None)));
     }
 
-    #[test]
-    fn gateway_listener_addresses_skip_driver_address_covered_by_wildcard() {
-        let primary: SocketAddr = "0.0.0.0:8080".parse().unwrap();
-        let docker: SocketAddr = "172.18.0.1:8080".parse().unwrap();
+    #[tokio::test]
+    async fn failed_gateway_listener_bind_does_not_attempt_persisted_sandbox_resume() {
+        let occupied_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let occupied_address = occupied_listener.local_addr().unwrap();
+        let resume_attempted = AtomicBool::new(false);
+        let primary_address: SocketAddr = "127.0.0.1:0".parse().unwrap();
 
-        assert_eq!(
-            gateway_listener_addresses(primary, &[docker, docker]),
-            vec![primary]
+        let result: openshell_core::Result<()> = async {
+            let _listeners = bind_gateway_listeners(
+                primary_address,
+                &[docker_listener_requirement(occupied_address)],
+            )
+            .await?;
+            resume_attempted.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+        .await;
+
+        assert!(
+            result.is_err(),
+            "binding the occupied extra gateway address should fail"
+        );
+        assert!(
+            !resume_attempted.load(Ordering::SeqCst),
+            "persisted sandbox resume must not run before every gateway listener is bound"
         );
     }
 
-    #[test]
-    fn gateway_listener_addresses_include_driver_address_on_distinct_ip() {
-        let primary: SocketAddr = "127.0.0.1:8080".parse().unwrap();
-        let docker: SocketAddr = "172.18.0.1:8080".parse().unwrap();
-
-        assert_eq!(
-            gateway_listener_addresses(primary, &[docker, docker]),
-            vec![primary, docker]
-        );
+    fn docker_listener_requirement(address: SocketAddr) -> GatewayListenerRequirement {
+        GatewayListenerRequirement::Exact {
+            address,
+            driver_name: "docker".to_string(),
+            reason: "managed bridge".to_string(),
+        }
     }
 }
