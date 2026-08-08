@@ -17,7 +17,7 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tokio::net::unix::OwnedWriteHalf;
-use tokio::sync::{Mutex, broadcast, mpsc};
+use tokio::sync::{Mutex, broadcast, mpsc, watch};
 use tracing::{debug, info, warn};
 
 #[derive(Debug, Clone)]
@@ -64,23 +64,48 @@ pub enum ControlUpdate {
 pub struct Publisher {
     state: Arc<RwLock<BootstrapData>>,
     updates: broadcast::Sender<WireServerMessage>,
+    provider_env_applied: watch::Receiver<u64>,
 }
 
 impl Publisher {
-    pub fn publish_provider_env(&self, revision: u64, provider_child_env: HashMap<String, String>) {
+    pub async fn publish_provider_env(
+        &self,
+        revision: u64,
+        provider_child_env: HashMap<String, String>,
+        timeout: Duration,
+    ) -> Result<()> {
         {
             let mut state = self.state.write().expect("sidecar control state poisoned");
-            if revision <= state.provider_env_revision {
-                return;
-            }
             state.provider_env_revision = revision;
             state.provider_child_env.clone_from(&provider_child_env);
         }
 
-        let _ = self.updates.send(WireServerMessage::ProviderEnvUpdated {
-            revision,
-            provider_child_env,
-        });
+        let mut applied = self.provider_env_applied.clone();
+        if *applied.borrow() != revision {
+            self.updates
+                .send(WireServerMessage::ProviderEnvUpdated {
+                    revision,
+                    provider_child_env,
+                })
+                .map_err(|_| miette::miette!("sidecar process supervisor is not connected"))?;
+
+            tokio::time::timeout(timeout, async {
+                while *applied.borrow_and_update() != revision {
+                    applied.changed().await.map_err(|_| {
+                        miette::miette!("sidecar provider environment acknowledger closed")
+                    })?;
+                }
+                Ok::<(), miette::Report>(())
+            })
+            .await
+            .map_err(|_| {
+                miette::miette!(
+                    "timed out waiting for sidecar provider environment revision {revision}"
+                )
+            })??;
+        }
+
+        Ok(())
     }
 
     pub fn publish_policy(
@@ -156,6 +181,7 @@ pub struct ProcessConnection {
 enum WireClientMessage {
     BootstrapRequest { supervisor_pid: u32 },
     EntrypointStarted { pid: u32 },
+    ProviderEnvApplied { revision: u64 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -327,9 +353,16 @@ pub fn spawn_server(
     let state = Arc::new(RwLock::new(bootstrap));
     let (updates, _) = broadcast::channel(32);
     let (entrypoint_tx, entrypoint_rx) = mpsc::channel(8);
+    let (provider_env_applied_tx, provider_env_applied) = watch::channel(
+        state
+            .read()
+            .expect("sidecar control state poisoned")
+            .provider_env_revision,
+    );
     let publisher = Publisher {
         state: state.clone(),
         updates: updates.clone(),
+        provider_env_applied,
     };
 
     let connection_task = tokio::spawn(accept_authoritative_connection(
@@ -339,6 +372,7 @@ pub fn spawn_server(
         state,
         updates,
         entrypoint_tx,
+        provider_env_applied_tx,
     ));
     info!(path = %path.display(), "Sidecar control socket listening");
 
@@ -357,6 +391,7 @@ async fn accept_authoritative_connection(
     state: Arc<RwLock<BootstrapData>>,
     updates: broadcast::Sender<WireServerMessage>,
     entrypoint_tx: mpsc::Sender<EntrypointStarted>,
+    provider_env_applied_tx: watch::Sender<u64>,
 ) {
     let stream = match listener.accept().await {
         Ok((stream, _addr)) => stream,
@@ -381,7 +416,15 @@ async fn accept_authoritative_connection(
         );
     }
 
-    if let Err(err) = handle_connection(stream, expected_peer, state, updates, entrypoint_tx).await
+    if let Err(err) = handle_connection(
+        stream,
+        expected_peer,
+        state,
+        updates,
+        entrypoint_tx,
+        provider_env_applied_tx,
+    )
+    .await
     {
         warn!(error = %err, "Authoritative sidecar control connection closed");
     }
@@ -394,6 +437,7 @@ async fn handle_connection(
     state: Arc<RwLock<BootstrapData>>,
     updates: broadcast::Sender<WireServerMessage>,
     entrypoint_tx: mpsc::Sender<EntrypointStarted>,
+    provider_env_applied_tx: watch::Sender<u64>,
 ) -> Result<()> {
     let credentials = stream
         .peer_cred()
@@ -440,6 +484,11 @@ async fn handle_connection(
                 "sidecar control client sent entrypoint event before bootstrap"
             ));
         }
+        WireClientMessage::ProviderEnvApplied { .. } => {
+            return Err(miette::miette!(
+                "sidecar control client sent provider environment acknowledgement before bootstrap"
+            ));
+        }
     }
 
     // Subscribe before taking the bootstrap snapshot so an update can neither
@@ -474,6 +523,9 @@ async fn handle_connection(
                             })
                             .await
                             .map_err(|_| miette::miette!("sidecar entrypoint receiver closed"))?;
+                    }
+                    WireClientMessage::ProviderEnvApplied { revision } => {
+                        provider_env_applied_tx.send_replace(revision);
                     }
                 }
             }
@@ -567,6 +619,15 @@ async fn connect_with_retry(path: &Path, timeout: Duration) -> Result<tokio::net
 
 pub async fn send_entrypoint_started(writer: &Arc<Mutex<OwnedWriteHalf>>, pid: u32) -> Result<()> {
     let message = WireClientMessage::EntrypointStarted { pid };
+    let mut writer = writer.lock().await;
+    write_json_line(&mut *writer, &message).await
+}
+
+pub async fn send_provider_env_applied(
+    writer: &Arc<Mutex<OwnedWriteHalf>>,
+    revision: u64,
+) -> Result<()> {
+    let message = WireClientMessage::ProviderEnvApplied { revision };
     let mut writer = writer.lock().await;
     write_json_line(&mut *writer, &message).await
 }
@@ -683,6 +744,66 @@ mod tests {
             }
             other => panic!("unexpected sidecar update: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn changed_lower_provider_fingerprint_is_delivered_to_process_client() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("control.sock");
+        let server = spawn_server(
+            &socket,
+            BootstrapData {
+                policy_proto: SandboxPolicy::default(),
+                provider_env_revision: 9,
+                provider_child_env: HashMap::from([("TOKEN".to_string(), "old".to_string())]),
+                agent_proposals_enabled: false,
+                proxy_ca_cert_path: None,
+                proxy_ca_bundle_path: None,
+            },
+            current_peer(),
+        )
+        .unwrap();
+        let publisher = server.publisher();
+        let (_bootstrap, mut connection) = connect_process_client(&socket, Duration::from_secs(1))
+            .await
+            .unwrap();
+
+        let publish = tokio::spawn(async move {
+            publisher
+                .publish_provider_env(
+                    3,
+                    HashMap::from([("TOKEN".to_string(), "new".to_string())]),
+                    Duration::from_secs(1),
+                )
+                .await
+        });
+
+        let update = tokio::time::timeout(Duration::from_secs(1), connection.updates.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match update {
+            ControlUpdate::ProviderEnv {
+                revision,
+                provider_child_env,
+            } => {
+                assert_eq!(revision, 3);
+                assert_eq!(
+                    provider_child_env.get("TOKEN").map(String::as_str),
+                    Some("new")
+                );
+            }
+            other => panic!("unexpected sidecar update: {other:?}"),
+        }
+        assert!(
+            !publish.is_finished(),
+            "publisher must wait until the process supervisor applies the environment"
+        );
+
+        send_provider_env_applied(&connection.writer, 3)
+            .await
+            .unwrap();
+        publish.await.unwrap().unwrap();
     }
 
     #[tokio::test]
