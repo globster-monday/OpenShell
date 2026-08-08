@@ -305,6 +305,7 @@ pub async fn run_sandbox(
         process_control_closed = Some(connection.closed);
         spawn_sidecar_control_update_watcher(
             connection.updates,
+            process_control_writer.clone(),
             provider_credentials.clone(),
             agent_proposals.clone(),
         );
@@ -891,6 +892,7 @@ fn load_policy_from_sidecar_bootstrap(
 
 fn spawn_sidecar_control_update_watcher(
     mut updates: tokio::sync::mpsc::UnboundedReceiver<sidecar_control::ControlUpdate>,
+    writer: Option<Arc<tokio::sync::Mutex<tokio::net::unix::OwnedWriteHalf>>>,
     provider_credentials: ProviderCredentialState,
     agent_proposals: AgentProposals,
 ) -> tokio::task::JoinHandle<()> {
@@ -901,11 +903,25 @@ fn spawn_sidecar_control_update_watcher(
                     revision,
                     provider_child_env,
                 } => {
-                    if revision <= provider_credentials.snapshot().revision {
+                    if !provider_environment_fingerprint_changed(
+                        provider_credentials.snapshot().revision,
+                        revision,
+                    ) {
                         continue;
                     }
                     let env_count = provider_credentials
                         .install_child_env_snapshot(revision, provider_child_env);
+                    if let Some(writer) = writer.as_ref()
+                        && let Err(error) =
+                            sidecar_control::send_provider_env_applied(writer, revision).await
+                    {
+                        warn!(
+                            error = %error,
+                            provider_env_revision = revision,
+                            "Failed to acknowledge sidecar provider environment"
+                        );
+                        continue;
+                    }
                     ocsf_emit!(
                         ConfigStateChangeBuilder::new(ocsf_ctx())
                             .severity(SeverityId::Informational)
@@ -946,6 +962,10 @@ fn spawn_sidecar_control_update_watcher(
             }
         }
     })
+}
+
+fn provider_environment_fingerprint_changed(current: u64, candidate: u64) -> bool {
+    current != candidate
 }
 
 #[cfg(target_os = "linux")]
@@ -2415,6 +2435,14 @@ fn unchanged_policy_revision_to_ack(
         .then_some(result.version)
 }
 
+fn unchanged_policy_revision_ready_to_ack(
+    candidate: Option<u32>,
+    provider_env_reconciled: bool,
+    policy_runtime_changed: bool,
+) -> Option<u32> {
+    candidate.filter(|_| provider_env_reconciled && !policy_runtime_changed)
+}
+
 /// Deliver policy status updates independently from policy reconciliation.
 ///
 /// The channel is FIFO, so a delayed older status can never arrive after a
@@ -2767,6 +2795,7 @@ async fn run_policy_poll_loop(ctx: PolicyPollLoopContext) -> Result<()> {
             &current_policy_hash,
             &result,
         );
+        let mut provider_env_reconciled = !provider_env_changed;
 
         // A local policy override is not coupled to the gateway policy
         // snapshot, so its service registry can still be reconciled alone.
@@ -2825,13 +2854,24 @@ async fn run_policy_poll_loop(ctx: PolicyPollLoopContext) -> Result<()> {
                     );
                     let child_env = ctx.provider_credentials.child_env_with_gcp_resolved();
                     let env_count = child_env.len();
-                    if let Some(publisher) = ctx.sidecar_control_publisher.as_ref() {
-                        publisher.publish_provider_env(
-                            env_result.provider_env_revision,
-                            child_env.clone(),
+                    if let Some(publisher) = ctx.sidecar_control_publisher.as_ref()
+                        && let Err(error) = publisher
+                            .publish_provider_env(
+                                env_result.provider_env_revision,
+                                child_env.clone(),
+                                Duration::from_secs(SIDECAR_READY_TIMEOUT_SECS),
+                            )
+                            .await
+                    {
+                        warn!(
+                            error = %error,
+                            provider_env_revision = env_result.provider_env_revision,
+                            "Settings poll: process supervisor did not apply provider environment"
                         );
+                        continue;
                     }
                     current_provider_env_revision = env_result.provider_env_revision;
+                    provider_env_reconciled = true;
                     ocsf_emit!(
                         ConfigStateChangeBuilder::new(ocsf_ctx())
                             .severity(SeverityId::Informational)
@@ -2858,7 +2898,7 @@ async fn run_policy_poll_loop(ctx: PolicyPollLoopContext) -> Result<()> {
             }
         }
 
-        if policy_runtime_changed {
+        if policy_runtime_changed && provider_env_reconciled {
             let pid = ctx.entrypoint_pid.load(Ordering::Acquire);
             let runtime_result = match result.policy.as_ref() {
                 Some(policy) if middleware_registry_changed => {
@@ -2991,7 +3031,11 @@ async fn run_policy_poll_loop(ctx: PolicyPollLoopContext) -> Result<()> {
             }
         }
 
-        if !policy_runtime_changed && let Some(version) = unchanged_policy_revision {
+        if let Some(version) = unchanged_policy_revision_ready_to_ack(
+            unchanged_policy_revision,
+            provider_env_reconciled,
+            policy_runtime_changed,
+        ) {
             enqueue_policy_status(&status_sender, PolicyStatusUpdate::loaded(version));
             current_policy_version = version;
             ocsf_emit!(
@@ -3257,7 +3301,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sidecar_control_provider_env_update_installs_newer_revision() {
+    async fn sidecar_control_provider_env_update_installs_changed_fingerprint() {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let provider_credentials = ProviderCredentialState::from_child_env_snapshot(
             1,
@@ -3265,12 +3309,13 @@ mod tests {
         );
         let handle = spawn_sidecar_control_update_watcher(
             rx,
+            None,
             provider_credentials.clone(),
             AgentProposals::default(),
         );
 
         tx.send(sidecar_control::ControlUpdate::ProviderEnv {
-            revision: 2,
+            revision: 0,
             provider_child_env: std::collections::HashMap::from([(
                 "TOKEN".to_string(),
                 "new".to_string(),
@@ -3280,7 +3325,7 @@ mod tests {
 
         timeout(Duration::from_secs(1), async {
             loop {
-                if provider_credentials.snapshot().revision == 2 {
+                if provider_credentials.snapshot().revision == 0 {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -3289,14 +3334,14 @@ mod tests {
         .await
         .unwrap();
         let snapshot = provider_credentials.snapshot();
-        assert_eq!(snapshot.revision, 2);
+        assert_eq!(snapshot.revision, 0);
         assert_eq!(
             snapshot.child_env.get("TOKEN").map(String::as_str),
             Some("new")
         );
 
         tx.send(sidecar_control::ControlUpdate::ProviderEnv {
-            revision: 1,
+            revision: 0,
             provider_child_env: std::collections::HashMap::from([(
                 "TOKEN".to_string(),
                 "stale".to_string(),
@@ -3321,8 +3366,12 @@ mod tests {
         let provider_credentials =
             ProviderCredentialState::from_child_env_snapshot(0, std::collections::HashMap::new());
         let agent_proposals = AgentProposals::new(true);
-        let handle =
-            spawn_sidecar_control_update_watcher(rx, provider_credentials, agent_proposals.clone());
+        let handle = spawn_sidecar_control_update_watcher(
+            rx,
+            None,
+            provider_credentials,
+            agent_proposals.clone(),
+        );
 
         tx.send(sidecar_control::ControlUpdate::AgentProposals {
             enabled: false,
@@ -3826,6 +3875,25 @@ filesystem_policy:
         assert_eq!(
             unchanged_policy_revision_to_ack(false, 1, "same-policy", &result),
             None
+        );
+    }
+
+    #[test]
+    fn unchanged_policy_revision_waits_for_provider_environment_reconciliation() {
+        assert_eq!(
+            unchanged_policy_revision_ready_to_ack(Some(2), false, false),
+            None,
+            "a failed provider refresh must keep the revision pending"
+        );
+        assert_eq!(
+            unchanged_policy_revision_ready_to_ack(Some(2), true, false),
+            Some(2),
+            "an installed provider environment permits acknowledgement"
+        );
+        assert_eq!(
+            unchanged_policy_revision_ready_to_ack(Some(2), true, true),
+            None,
+            "runtime reconciliation retains its own acknowledgement path"
         );
     }
 
