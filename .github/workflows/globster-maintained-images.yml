@@ -12,9 +12,9 @@ jobs:
     uses: globster-monday/OpenShell/.github/workflows/docker-build.yml@a4e5b4acd155c920a3d1dc60c17b19afdada856d
     with:
       component: gateway
-      cargo-version: 0.0.92-globster.3
-      image-tag: 0.0.92-resident-5b96d1ac
-      checkout-ref: 5b96d1ac1af67232732a20e96bc04c17b017aabc
+      cargo-version: 0.0.92-globster.4
+      image-tag: 0.0.92-resident-356a15da
+      checkout-ref: 356a15da1eda1388a9680a0909f4a7276b3b031d
       platform: linux/amd64,linux/arm64
       timeout-minutes: 60
     secrets: inherit
@@ -23,9 +23,9 @@ jobs:
     uses: globster-monday/OpenShell/.github/workflows/docker-build.yml@a4e5b4acd155c920a3d1dc60c17b19afdada856d
     with:
       component: supervisor
-      cargo-version: 0.0.92-globster.3
-      image-tag: 0.0.92-resident-5b96d1ac
-      checkout-ref: 5b96d1ac1af67232732a20e96bc04c17b017aabc
+      cargo-version: 0.0.92-globster.4
+      image-tag: 0.0.92-resident-356a15da
+      checkout-ref: 356a15da1eda1388a9680a0909f4a7276b3b031d
       platform: linux/amd64,linux/arm64
       timeout-minutes: 60
     secrets: inherit
