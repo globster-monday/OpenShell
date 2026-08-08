@@ -1,0 +1,31 @@
+name: Globster maintained images
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  gateway:
+    uses: globster-monday/OpenShell/.github/workflows/docker-build.yml@a4e5b4acd155c920a3d1dc60c17b19afdada856d
+    with:
+      component: gateway
+      cargo-version: 0.0.92-globster.2
+      image-tag: 0.0.92-resident-3c0577ad
+      checkout-ref: 3c0577ad3d0403bc18ace9d66cd2ae769af10ca5
+      platform: linux/amd64,linux/arm64
+      timeout-minutes: 60
+    secrets: inherit
+
+  supervisor:
+    uses: globster-monday/OpenShell/.github/workflows/docker-build.yml@a4e5b4acd155c920a3d1dc60c17b19afdada856d
+    with:
+      component: supervisor
+      cargo-version: 0.0.92-globster.2
+      image-tag: 0.0.92-resident-3c0577ad
+      checkout-ref: 3c0577ad3d0403bc18ace9d66cd2ae769af10ca5
+      platform: linux/amd64,linux/arm64
+      timeout-minutes: 60
+    secrets: inherit
