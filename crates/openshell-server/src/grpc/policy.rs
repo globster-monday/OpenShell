@@ -1471,7 +1471,10 @@ pub(super) async fn compute_provider_env_revision_with_catalog(
     let mut hasher = Sha256::new();
     hasher.update(b"openshell-provider-env-revision-v1");
 
-    for provider_name in provider_names {
+    let mut provider_names = provider_names.to_vec();
+    provider_names.sort();
+
+    for provider_name in &provider_names {
         hasher.update(provider_name.as_bytes());
         match store
             .get_by_name(Provider::object_type(), workspace, provider_name)
@@ -6244,6 +6247,41 @@ mod tests {
 
         assert_eq!(legacy_env, v2_env);
         assert_eq!(v2_env.get("GITHUB_TOKEN"), Some(&"ghp-test".to_string()));
+    }
+
+    #[tokio::test]
+    async fn provider_env_revision_is_independent_of_attached_provider_order() {
+        let state = test_server_state().await;
+        state
+            .store
+            .put_message(&test_provider("provider-alpha", "github"))
+            .await
+            .unwrap();
+        state
+            .store
+            .put_message(&test_provider("provider-beta", "github"))
+            .await
+            .unwrap();
+
+        let forward = compute_provider_env_revision(
+            state.store.as_ref(),
+            "default",
+            &["provider-alpha".to_string(), "provider-beta".to_string()],
+        )
+        .await
+        .unwrap();
+        let reverse = compute_provider_env_revision(
+            state.store.as_ref(),
+            "default",
+            &["provider-beta".to_string(), "provider-alpha".to_string()],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            forward, reverse,
+            "provider attachment order must not change the environment fingerprint"
+        );
     }
 
     #[tokio::test]
