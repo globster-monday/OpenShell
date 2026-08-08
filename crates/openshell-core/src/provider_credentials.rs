@@ -3,7 +3,7 @@
 
 //! Runtime provider credential snapshots.
 
-use crate::secrets::SecretResolver;
+use crate::secrets::{SecretResolver, placeholder_for_env_key};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, RwLock};
 
@@ -37,12 +37,13 @@ impl ProviderCredentialState {
         credential_expires_at_ms: HashMap<String, i64>,
         dynamic_credentials: HashMap<String, crate::proto::ProviderProfileCredential>,
     ) -> Self {
-        let (child_env, generation_resolver, current_resolver) =
+        let (mut child_env, generation_resolver, current_resolver) =
             SecretResolver::from_provider_env_for_current_revision(
                 env,
                 credential_expires_at_ms,
                 revision,
             );
+        use_current_placeholders(&mut child_env);
         let snapshot = Arc::new(ProviderCredentialSnapshot {
             revision,
             child_env,
@@ -212,7 +213,7 @@ impl ProviderCredentialState {
         // at process startup before any HTTP flows through the proxy.
         if let Some(ref resolver) = inner.combined_resolver {
             for key in google_cloud::STATIC_CONFIG_KEYS {
-                let placeholder = crate::secrets::placeholder_for_env_key(key);
+                let placeholder = placeholder_for_env_key(key);
                 if let Some(value) = resolver.resolve_placeholder(&placeholder) {
                     env.insert(key.to_string(), value.to_string());
                 }
@@ -232,7 +233,7 @@ impl ProviderCredentialState {
         const DEFAULT_EXPIRES_IN: i64 = 3600;
         let resolver = self.resolver()?;
         for key in crate::google_cloud::TOKEN_ENV_KEYS {
-            let placeholder = crate::secrets::placeholder_for_env_key(key);
+            let placeholder = placeholder_for_env_key(key);
             if resolver.resolve_placeholder(&placeholder).is_none() {
                 continue;
             }
@@ -268,6 +269,7 @@ impl ProviderCredentialState {
                 credential_expires_at_ms,
                 revision,
             );
+        use_current_placeholders(&mut child_env);
         let mut inner = self
             .inner
             .write()
@@ -296,6 +298,12 @@ impl ProviderCredentialState {
     }
 }
 
+fn use_current_placeholders(child_env: &mut HashMap<String, String>) {
+    for (key, placeholder) in child_env {
+        *placeholder = placeholder_for_env_key(key);
+    }
+}
+
 fn merge_resolvers(
     generations: &VecDeque<Arc<SecretResolver>>,
     current_resolver: Option<&Arc<SecretResolver>>,
@@ -315,7 +323,7 @@ mod tests {
     use crate::google_cloud;
 
     #[test]
-    fn snapshots_use_revision_scoped_placeholders() {
+    fn workload_placeholders_resolve_the_current_credential_after_rotation() {
         let state = ProviderCredentialState::from_environment(
             10,
             HashMap::from([("GITHUB_TOKEN".to_string(), "old".to_string())]),
@@ -323,10 +331,8 @@ mod tests {
             HashMap::new(),
         );
         let first = state.snapshot();
-        assert_eq!(
-            first.child_env.get("GITHUB_TOKEN").map(String::as_str),
-            Some("openshell:resolve:env:v10_GITHUB_TOKEN")
-        );
+        let inherited_placeholder = first.child_env["GITHUB_TOKEN"].clone();
+        assert_eq!(inherited_placeholder, "openshell:resolve:env:GITHUB_TOKEN");
 
         state.install_environment(
             11,
@@ -337,10 +343,15 @@ mod tests {
         let second = state.snapshot();
         assert_eq!(
             second.child_env.get("GITHUB_TOKEN").map(String::as_str),
-            Some("openshell:resolve:env:v11_GITHUB_TOKEN")
+            Some("openshell:resolve:env:GITHUB_TOKEN")
         );
 
         let resolver = state.resolver().expect("resolver");
+        assert_eq!(
+            resolver.resolve_placeholder(&inherited_placeholder),
+            Some("new"),
+            "a long-running workload must not retain its bootstrap credential"
+        );
         assert_eq!(
             resolver.resolve_placeholder("openshell:resolve:env:v10_GITHUB_TOKEN"),
             Some("old")
@@ -431,7 +442,7 @@ mod tests {
         let env = state.child_env_with_gcp_resolved();
         assert_eq!(
             env.get("GITHUB_TOKEN").map(String::as_str),
-            Some("openshell:resolve:env:v1_GITHUB_TOKEN"),
+            Some("openshell:resolve:env:GITHUB_TOKEN"),
             "non-GCP env should remain as placeholder"
         );
         assert!(!env.contains_key("GCE_METADATA_HOST"));
