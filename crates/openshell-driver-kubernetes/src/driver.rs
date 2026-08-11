@@ -690,6 +690,9 @@ impl KubernetesComputeDriver {
         config
             .validate_proxy_uid()
             .map_err(KubernetesDriverError::Precondition)?;
+        config
+            .validate_upstream_ca_config_map_name()
+            .map_err(KubernetesDriverError::Precondition)?;
         let base_config = match kube::Config::incluster() {
             Ok(c) => c,
             Err(_) => kube::Config::infer()
@@ -1073,6 +1076,7 @@ impl KubernetesComputeDriver {
                 .config
                 .sidecar
                 .process_binary_aware_network_policy,
+            upstream_ca_config_map_name: &self.config.sidecar.upstream_ca_config_map_name,
             service_account_name: &self.config.service_account_name,
             sandbox_id: &sandbox.id,
             sandbox_name: &sandbox.name,
@@ -1678,6 +1682,9 @@ const SIDECAR_SSH_SOCKET_FILE: &str = "@openshell-sidecar-ssh";
 const SIDECAR_TLS_VOLUME_NAME: &str = "openshell-supervisor-tls";
 const SIDECAR_TLS_MOUNT_PATH: &str = "/etc/openshell-tls/proxy";
 const SIDECAR_CLIENT_TLS_MOUNT_PATH: &str = "/etc/openshell-tls/proxy/client";
+const SIDECAR_UPSTREAM_CA_VOLUME_NAME: &str = "openshell-upstream-ca";
+const SIDECAR_UPSTREAM_CA_MOUNT_PATH: &str = "/etc/ssl/certs/ca-certificates.crt";
+const SIDECAR_UPSTREAM_CA_CONFIG_MAP_KEY: &str = "ca-certificates.crt";
 
 /// Build the emptyDir volume that holds the supervisor binary.
 ///
@@ -2034,6 +2041,17 @@ fn supervisor_sidecar_container(
             .push(serde_json::json!({
                 "name": SPIFFE_WORKLOAD_API_VOLUME_NAME,
                 "mountPath": spiffe_socket_mount_path(params.provider_spiffe_workload_api_socket_path),
+                "readOnly": true,
+            }));
+    }
+    if !params.upstream_ca_config_map_name.is_empty() {
+        container["volumeMounts"]
+            .as_array_mut()
+            .expect("volumeMounts is an array")
+            .push(serde_json::json!({
+                "name": SIDECAR_UPSTREAM_CA_VOLUME_NAME,
+                "mountPath": SIDECAR_UPSTREAM_CA_MOUNT_PATH,
+                "subPath": SIDECAR_UPSTREAM_CA_CONFIG_MAP_KEY,
                 "readOnly": true,
             }));
     }
@@ -2422,6 +2440,7 @@ struct SandboxPodParams<'a> {
     topology: SupervisorTopology,
     proxy_uid: u32,
     process_binary_aware_network_policy: bool,
+    upstream_ca_config_map_name: &'a str,
     service_account_name: &'a str,
     sandbox_id: &'a str,
     sandbox_name: &'a str,
@@ -2456,6 +2475,7 @@ impl Default for SandboxPodParams<'_> {
             topology: SupervisorTopology::default(),
             proxy_uid: DEFAULT_PROXY_UID,
             process_binary_aware_network_policy: true,
+            upstream_ca_config_map_name: "",
             service_account_name: DEFAULT_SANDBOX_SERVICE_ACCOUNT_NAME,
             sandbox_id: "",
             sandbox_name: "",
@@ -2894,6 +2914,20 @@ fn sandbox_template_to_k8s_with_validated_config(
             .iter()
             .map(kubernetes_driver_volume_to_k8s),
     );
+    if params.topology == SupervisorTopology::Sidecar
+        && !params.upstream_ca_config_map_name.is_empty()
+    {
+        volumes.push(serde_json::json!({
+            "name": SIDECAR_UPSTREAM_CA_VOLUME_NAME,
+            "configMap": {
+                "name": params.upstream_ca_config_map_name,
+                "items": [{
+                    "key": SIDECAR_UPSTREAM_CA_CONFIG_MAP_KEY,
+                    "path": SIDECAR_UPSTREAM_CA_CONFIG_MAP_KEY,
+                }],
+            },
+        }));
+    }
     spec.insert("volumes".to_string(), serde_json::Value::Array(volumes));
 
     // Add hostAliases so sandbox pods can reach the Docker host.
@@ -4524,6 +4558,7 @@ mod tests {
             grpc_endpoint: "https://openshell-gateway.openshell.svc:8080",
             client_tls_secret_name: "openshell-client-tls",
             proxy_uid: 2200,
+            upstream_ca_config_map_name: "platform-egress-ca",
             sandbox_uid: 1500,
             sandbox_gid: 1500,
             ..SandboxPodParams::default()
@@ -4681,6 +4716,19 @@ mod tests {
             Some("/etc/openshell-tls/proxy/client/ca.crt")
         );
         let sidecar_mounts = sidecar["volumeMounts"].as_array().unwrap();
+        let upstream_ca_mount = sidecar_mounts
+            .iter()
+            .find(|mount| mount["name"] == SIDECAR_UPSTREAM_CA_VOLUME_NAME)
+            .unwrap();
+        assert_eq!(
+            upstream_ca_mount["mountPath"],
+            SIDECAR_UPSTREAM_CA_MOUNT_PATH
+        );
+        assert_eq!(
+            upstream_ca_mount["subPath"],
+            SIDECAR_UPSTREAM_CA_CONFIG_MAP_KEY
+        );
+        assert_eq!(upstream_ca_mount["readOnly"], true);
         assert!(
             !sidecar_mounts
                 .iter()
@@ -4701,6 +4749,18 @@ mod tests {
             "agent container must not mount gateway client TLS secret in sidecar topology"
         );
         let volumes = pod_template["spec"]["volumes"].as_array().unwrap();
+        let upstream_ca = volumes
+            .iter()
+            .find(|volume| volume["name"] == SIDECAR_UPSTREAM_CA_VOLUME_NAME)
+            .unwrap();
+        assert_eq!(upstream_ca["configMap"]["name"], "platform-egress-ca");
+        assert_eq!(
+            upstream_ca["configMap"]["items"][0],
+            serde_json::json!({
+                "key": SIDECAR_UPSTREAM_CA_CONFIG_MAP_KEY,
+                "path": SIDECAR_UPSTREAM_CA_CONFIG_MAP_KEY,
+            })
+        );
         let sa_token = volumes
             .iter()
             .find(|volume| volume["name"] == "openshell-sa-token")

@@ -61,6 +61,9 @@ supervisor:
     # inspection capabilities, and enforces endpoint/L7 policy without matching
     # policy.binaries.
     processBinaryAwareNetworkPolicy: true
+    # -- Optional ConfigMap in the sandbox namespace whose ca-certificates.crt
+    # key is mounted read-only into network sidecars for upstream TLS trust.
+    upstreamCaConfigMapName: ""
 
 # -- Image pull secrets attached to gateway and helper pods.
 imagePullSecrets: []
