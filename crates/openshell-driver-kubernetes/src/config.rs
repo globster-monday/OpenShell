@@ -18,6 +18,20 @@ pub const DEFAULT_WORKSPACE_STORAGE_SIZE: &str = "2Gi";
 /// Default non-root UID for relaxed Kubernetes network supervisor sidecars.
 pub const DEFAULT_PROXY_UID: u32 = 1337;
 
+fn is_dns_label(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 63
+        && !value.starts_with('-')
+        && !value.ends_with('-')
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+fn is_dns_subdomain(value: &str) -> bool {
+    value.len() <= 253 && value.split('.').all(is_dns_label)
+}
+
 /// How the supervisor binary is delivered into sandbox pods.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -102,6 +116,9 @@ pub struct KubernetesSidecarConfig {
     /// drops the extra `/proc` inspection permissions, and evaluates
     /// endpoint/L7 policy without matching `policy.binaries`.
     pub process_binary_aware_network_policy: bool,
+    /// Optional `ConfigMap` in the sandbox namespace containing an additional
+    /// upstream TLS bundle under `ca-certificates.crt`.
+    pub upstream_ca_config_map_name: String,
 }
 
 impl Default for KubernetesSidecarConfig {
@@ -109,6 +126,7 @@ impl Default for KubernetesSidecarConfig {
         Self {
             proxy_uid: DEFAULT_PROXY_UID,
             process_binary_aware_network_policy: true,
+            upstream_ca_config_map_name: String::new(),
         }
     }
 }
@@ -122,6 +140,17 @@ impl KubernetesSidecarConfig {
             ));
         }
         Ok(())
+    }
+
+    pub fn validate_upstream_ca_config_map_name(&self) -> Result<(), String> {
+        let name = self.upstream_ca_config_map_name.as_str();
+        if name.is_empty() || is_dns_subdomain(name) {
+            return Ok(());
+        }
+        Err(
+            "sidecar.upstream_ca_config_map_name must be empty or a Kubernetes DNS-1123 subdomain"
+                .to_string(),
+        )
     }
 }
 
@@ -388,6 +417,18 @@ impl KubernetesComputeConfig {
         self.sidecar.validate_proxy_uid()
     }
 
+    pub fn validate_upstream_ca_config_map_name(&self) -> Result<(), String> {
+        self.sidecar.validate_upstream_ca_config_map_name()?;
+        if self.topology != SupervisorTopology::Sidecar
+            && !self.sidecar.upstream_ca_config_map_name.is_empty()
+        {
+            return Err(
+                "sidecar.upstream_ca_config_map_name requires topology = \"sidecar\"".to_string(),
+            );
+        }
+        Ok(())
+    }
+
     /// Resolve the sandbox UID/GID pair.
     ///
     /// Resolution order:
@@ -531,6 +572,7 @@ mod tests {
     fn default_sidecar_requires_process_binary_aware_network_policy() {
         let cfg = KubernetesComputeConfig::default();
         assert!(cfg.sidecar.process_binary_aware_network_policy);
+        assert!(cfg.sidecar.upstream_ca_config_map_name.is_empty());
     }
 
     #[test]
@@ -583,6 +625,38 @@ mod tests {
         let cfg: KubernetesComputeConfig = serde_json::from_value(json).unwrap();
         assert_eq!(cfg.sidecar.proxy_uid, 2000);
         cfg.validate_proxy_uid().unwrap();
+    }
+
+    #[test]
+    fn validates_optional_sidecar_upstream_ca_config_map_name() {
+        let valid: KubernetesComputeConfig = serde_json::from_value(serde_json::json!({
+            "topology": "sidecar",
+            "sidecar": { "upstream_ca_config_map_name": "platform-egress-ca" }
+        }))
+        .unwrap();
+        valid.validate_upstream_ca_config_map_name().unwrap();
+
+        let invalid: KubernetesComputeConfig = serde_json::from_value(serde_json::json!({
+            "sidecar": { "upstream_ca_config_map_name": "Not Valid" }
+        }))
+        .unwrap();
+        assert!(
+            invalid
+                .validate_upstream_ca_config_map_name()
+                .unwrap_err()
+                .contains("DNS-1123")
+        );
+
+        let combined: KubernetesComputeConfig = serde_json::from_value(serde_json::json!({
+            "sidecar": { "upstream_ca_config_map_name": "platform-egress-ca" }
+        }))
+        .unwrap();
+        assert!(
+            combined
+                .validate_upstream_ca_config_map_name()
+                .unwrap_err()
+                .contains("requires topology")
+        );
     }
 
     #[test]

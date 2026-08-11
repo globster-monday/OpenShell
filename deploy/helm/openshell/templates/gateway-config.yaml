@@ -12,6 +12,9 @@ One value is intentionally NOT rendered here:
                                  when server.externalDbSecret is set, otherwise
                                  --db-url arg for SQLite
 */}}
+{{- if and .Values.supervisor.sidecar.upstreamCaConfigMapName (ne .Values.supervisor.topology "sidecar") }}
+{{- fail "supervisor.sidecar.upstreamCaConfigMapName requires supervisor.topology=sidecar" }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -148,3 +151,6 @@ data:
     [openshell.drivers.kubernetes.sidecar]
     proxy_uid                    = {{ .Values.supervisor.sidecar.proxyUid | default 1337 }}
     process_binary_aware_network_policy = {{ .Values.supervisor.sidecar.processBinaryAwareNetworkPolicy }}
+    {{- if .Values.supervisor.sidecar.upstreamCaConfigMapName }}
+    upstream_ca_config_map_name = {{ .Values.supervisor.sidecar.upstreamCaConfigMapName | quote }}
+    {{- end }}

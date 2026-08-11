@@ -159,6 +159,31 @@ tests:
           path: data["gateway.toml"]
           pattern: '(?ms)\[openshell\.drivers\.kubernetes\.sidecar\].*?process_binary_aware_network_policy\s*=\s*false'
 
+  - it: renders an optional upstream CA ConfigMap under [openshell.drivers.kubernetes.sidecar]
+    template: templates/gateway-config.yaml
+    set:
+      supervisor.topology: sidecar
+      supervisor.sidecar.upstreamCaConfigMapName: platform-egress-ca
+    asserts:
+      - matchRegex:
+          path: data["gateway.toml"]
+          pattern: '(?ms)\[openshell\.drivers\.kubernetes\.sidecar\].*?upstream_ca_config_map_name\s*=\s*"platform-egress-ca"'
+
+  - it: omits upstream CA configuration by default
+    template: templates/gateway-config.yaml
+    asserts:
+      - notMatchRegex:
+          path: data["gateway.toml"]
+          pattern: 'upstream_ca_config_map_name\s*='
+
+  - it: rejects upstream CA configuration outside sidecar topology
+    template: templates/statefulset.yaml
+    set:
+      supervisor.sidecar.upstreamCaConfigMapName: platform-egress-ca
+    asserts:
+      - failedTemplate:
+          errorMessage: "supervisor.sidecar.upstreamCaConfigMapName requires supervisor.topology=sidecar"
+
   - it: renders sandbox image pull secrets under [openshell.drivers.kubernetes]
     template: templates/gateway-config.yaml
     set:

@@ -100,6 +100,13 @@ struct Args {
     )]
     sidecar_process_binary_aware_network_policy: bool,
 
+    #[arg(
+        long = "sidecar-upstream-ca-config-map-name",
+        env = "OPENSHELL_K8S_SIDECAR_UPSTREAM_CA_CONFIG_MAP_NAME",
+        default_value = ""
+    )]
+    sidecar_upstream_ca_config_map_name: String,
+
     #[arg(long, env = "OPENSHELL_ENABLE_USER_NAMESPACES")]
     enable_user_namespaces: bool,
 
@@ -147,6 +154,7 @@ async fn main() -> Result<()> {
         sidecar: KubernetesSidecarConfig {
             proxy_uid: args.sidecar_proxy_uid,
             process_binary_aware_network_policy: args.sidecar_process_binary_aware_network_policy,
+            upstream_ca_config_map_name: args.sidecar_upstream_ca_config_map_name,
         },
         grpc_endpoint: args.grpc_endpoint.unwrap_or_default(),
         ssh_socket_path: args.sandbox_ssh_socket_path,

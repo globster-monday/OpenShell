@@ -68,6 +68,11 @@ Set `sidecar.process_binary_aware_network_policy = false` to run the network
 sidecar as the configured non-root `sidecar.proxy_uid`, omit the extra `/proc`
 inspection capabilities, and enforce endpoint/L7 network policy without
 matching `policy.binaries`.
+Operators may set `sidecar.upstream_ca_config_map_name` to a ConfigMap in the
+sandbox namespace with a `ca-certificates.crt` key. OpenShell mounts that key
+read-only at the standard Linux bundle path in the trusted network sidecar, so
+its existing upstream TLS verifier can include deployment-private roots. The
+field is not available through sandbox specifications.
 In this mode OpenShell preserves gateway session and SSH behavior, but the
 process supervisor does not perform root-to-sandbox privilege dropping or
 supervisor identity mount isolation. It still applies Landlock filesystem policy
