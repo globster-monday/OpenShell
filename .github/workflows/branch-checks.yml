@@ -40,14 +40,14 @@ jobs:
     name: mise Lockfile
     needs: pr_metadata
     if: needs.pr_metadata.outputs.should_run == 'true'
-    runs-on: linux-amd64-cpu8
-    container:
-      image: ghcr.io/nvidia/openshell/ci:latest
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4
+        with:
+          version: 2026.4.25
+          install: false
 
       - name: Mark workspace as safe for git
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -64,17 +64,13 @@ jobs:
     name: License Headers
     needs: pr_metadata
     if: needs.pr_metadata.outputs.should_run == 'true'
-    runs-on: linux-amd64-cpu8
-    container:
-      image: ghcr.io/nvidia/openshell/ci:latest
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Install tools
-        run: mise install --locked
+      - uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4
+        with:
+          version: 2026.4.25
 
       - name: Check license headers
         run: mise run license:check
@@ -86,24 +82,23 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [linux-amd64-cpu8, linux-arm64-cpu8]
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
     runs-on: ${{ matrix.runner }}
     env:
       SCCACHE_GHA_ENABLED: "true"
       SCCACHE_GHA_VERSION: branch-checks-rust-${{ matrix.runner }}
-    container:
-      image: ghcr.io/nvidia/openshell/ci:latest
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4
+        with:
+          version: 2026.4.25
+
+      - name: Install declared Rust components
+        run: rustup component add rustfmt rust-src rust-analyzer clippy
+
       - name: Configure GHA sccache backend
         uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
-
-      - name: Install tools
-        run: mise install --locked
 
       - name: Cache Rust target and registry
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
@@ -146,18 +141,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [linux-amd64-cpu8, linux-arm64-cpu8]
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
     runs-on: ${{ matrix.runner }}
-    container:
-      image: ghcr.io/nvidia/openshell/ci:latest
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Install tools
-        run: mise install --locked
+      - uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4
+        with:
+          version: 2026.4.25
 
       - name: Install dependencies
         run: uv sync --frozen
@@ -178,17 +169,13 @@ jobs:
     name: Markdown
     needs: pr_metadata
     if: needs.pr_metadata.outputs.should_run == 'true'
-    runs-on: linux-amd64-cpu8
-    container:
-      image: ghcr.io/nvidia/openshell/ci:latest
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Install tools
-        run: mise install --locked
+      - uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4
+        with:
+          version: 2026.4.25
 
       - name: Lint
         run: mise run markdown:lint

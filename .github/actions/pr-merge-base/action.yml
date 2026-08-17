@@ -3,7 +3,7 @@ description: Resolve and fetch the merge-base commit needed to diff a copy-pr-bo
 
 inputs:
   gh_token:
-    description: GitHub token for PR and compare API calls.
+    description: GitHub token for PR metadata calls.
     required: true
 
 outputs:
@@ -28,9 +28,15 @@ runs:
           pr_number="${BASH_REMATCH[1]}"
           base_ref=$(gh pr view "$pr_number" --repo "$GH_REPO" --json baseRefName -q '.baseRefName')
           # The mirrored branch is a push ref, so changed-files needs the true merge-base
-          # to diff the PR head against its base branch.
-          base_sha=$(gh api "repos/$GH_REPO/compare/$base_ref...$GITHUB_SHA_VALUE" --jq '.merge_base_commit.sha')
-          git fetch --no-tags --depth=1 origin "$base_sha"
+          # to diff the PR head against its base branch. Resolve it from fetched Git refs
+          # so base branch names containing slashes never become unsafe REST path segments.
+          base_remote_ref="refs/remotes/origin/$base_ref"
+          git fetch --no-tags origin "+refs/heads/$base_ref:$base_remote_ref"
+          base_sha=$(git merge-base "$base_remote_ref" "$GITHUB_SHA_VALUE")
+          [[ "$base_sha" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "Unable to resolve the pull request merge base" >&2
+            exit 1
+          }
           echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
         else
           echo "base_sha=" >> "$GITHUB_OUTPUT"

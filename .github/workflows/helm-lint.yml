@@ -55,6 +55,8 @@ jobs:
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: github.event_name == 'push'
+        with:
+          fetch-depth: 0
 
       - id: merge-base
         if: github.event_name == 'push'
@@ -79,17 +81,13 @@ jobs:
     name: Helm Lint
     needs: [pr_metadata, helm_changes]
     if: needs.pr_metadata.outputs.should_run == 'true' && needs.helm_changes.outputs.should_run == 'true'
-    runs-on: linux-amd64-cpu8
-    container:
-      image: ghcr.io/nvidia/openshell/ci:latest
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Install tools
-        run: mise install --locked
+      - uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4
+        with:
+          version: 2026.4.25
 
       - name: Lint Helm chart
         run: mise run helm:lint
