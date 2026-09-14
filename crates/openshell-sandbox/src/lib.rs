@@ -3993,22 +3993,21 @@ async fn run_policy_poll_loop_with_client<C: PolicyGatewayClient>(
                     } else {
                         let child_env = ctx.provider_credentials.child_env_with_gcp_resolved();
                         let env_count = child_env.len();
-                        if let Some(publisher) = ctx.sidecar_control_publisher.as_ref() {
-                            if let Err(error) = publisher
+                        if let Some(publisher) = ctx.sidecar_control_publisher.as_ref()
+                            && let Err(error) = publisher
                                 .publish_provider_env(
                                     provider_env_revision,
                                     child_env.clone(),
                                     Duration::from_secs(SIDECAR_READY_TIMEOUT_SECS),
                                 )
                                 .await
-                            {
-                                warn!(
-                                    error = %error,
-                                    provider_env_revision,
-                                    "Settings poll: process supervisor did not apply provider environment"
-                                );
-                                continue;
-                            }
+                        {
+                            warn!(
+                                error = %error,
+                                provider_env_revision,
+                                "Settings poll: process supervisor did not apply provider environment"
+                            );
+                            continue;
                         }
                         current_provider_env_revision = provider_env_revision;
                         provider_env_reconciled = true;

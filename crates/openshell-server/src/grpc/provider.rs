@@ -1330,8 +1330,7 @@ fn static_credential_binding(
     authorization_epoch: Option<&str>,
 ) -> StaticCredentialBinding {
     let authorization_scope = authorization_epoch
-        .map(|epoch| format!("refresh:{epoch}"))
-        .unwrap_or_else(|| "static".to_string());
+        .map_or_else(|| "static".to_string(), |epoch| format!("refresh:{epoch}"));
     let workload_credential_handle = sandbox_id
         .map(|sandbox_id| {
             derive_workload_credential_handle(
