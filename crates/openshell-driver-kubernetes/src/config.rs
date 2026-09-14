@@ -345,7 +345,7 @@ pub struct KubernetesComputeConfig {
     /// Send hostnames rather than validated IPs in CONNECT requests. This is a
     /// last-resort compatibility mode for hostname-filtering proxy ACLs.
     pub proxy_connect_by_hostname: Option<bool>,
-    /// Existing ConfigMap in each sandbox namespace containing the corporate
+    /// Existing `ConfigMap` in each sandbox namespace containing the corporate
     /// proxy CA bundle under the `ca-bundle.pem` key.
     pub proxy_ca_bundle_config_map_name: Option<String>,
     pub grpc_endpoint: String,
