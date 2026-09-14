@@ -40,7 +40,7 @@ jobs:
     name: mise Lockfile
     needs: pr_metadata
     if: needs.pr_metadata.outputs.should_run == 'true'
-    runs-on: linux-amd64-cpu8
+    runs-on: ubuntu-24.04
     container:
       image: ghcr.io/nvidia/openshell/ci:latest
       credentials:
@@ -64,7 +64,7 @@ jobs:
     name: License Headers
     needs: pr_metadata
     if: needs.pr_metadata.outputs.should_run == 'true'
-    runs-on: linux-amd64-cpu8
+    runs-on: ubuntu-24.04
     container:
       image: ghcr.io/nvidia/openshell/ci:latest
       credentials:
@@ -83,7 +83,7 @@ jobs:
     name: Cargo Deny
     needs: pr_metadata
     if: needs.pr_metadata.outputs.should_run == 'true'
-    runs-on: linux-amd64-cpu8
+    runs-on: ubuntu-24.04
     defaults:
       run:
         shell: nix develop .#devShells.x86_64-linux.default -c bash -euo pipefail {0}
@@ -110,9 +110,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: linux-amd64-cpu8
+          - runner: ubuntu-24.04
             system: x86_64-linux
-          - runner: linux-arm64-cpu8
+          - runner: ubuntu-24.04-arm
             system: aarch64-linux
           - runner: macos-15-xlarge
             system: aarch64-darwin
@@ -174,7 +174,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [linux-amd64-cpu8, linux-arm64-cpu8]
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
     runs-on: ${{ matrix.runner }}
     container:
       image: ghcr.io/nvidia/openshell/ci:latest
@@ -206,7 +206,7 @@ jobs:
     name: Go SDK
     needs: pr_metadata
     if: needs.pr_metadata.outputs.should_run == 'true'
-    runs-on: linux-amd64-cpu8
+    runs-on: ubuntu-24.04
     container:
       image: ghcr.io/nvidia/openshell/ci:latest
       credentials:
@@ -225,7 +225,7 @@ jobs:
     name: Markdown
     needs: pr_metadata
     if: needs.pr_metadata.outputs.should_run == 'true'
-    runs-on: linux-amd64-cpu8
+    runs-on: ubuntu-24.04
     container:
       image: ghcr.io/nvidia/openshell/ci:latest
       credentials:
@@ -244,7 +244,7 @@ jobs:
     name: TypeScript SDK
     needs: pr_metadata
     if: needs.pr_metadata.outputs.should_run == 'true'
-    runs-on: linux-amd64-cpu8
+    runs-on: ubuntu-24.04
     container:
       image: ghcr.io/nvidia/openshell/ci:latest
       credentials:

@@ -30,10 +30,10 @@ jobs:
       matrix:
         include:
           - triple: x86_64-unknown-linux-musl
-            runner: linux-amd64-cpu8
+            runner: ubuntu-24.04
             dev_shell: .#devShells.x86_64-linux.musl
           - triple: aarch64-unknown-linux-musl
-            runner: linux-arm64-cpu8
+            runner: ubuntu-24.04-arm
             dev_shell: .#devShells.aarch64-linux.musl
     uses: ./.github/workflows/build-binaries.yml
     with:
