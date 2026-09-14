@@ -345,6 +345,9 @@ pub struct KubernetesComputeConfig {
     /// Send hostnames rather than validated IPs in CONNECT requests. This is a
     /// last-resort compatibility mode for hostname-filtering proxy ACLs.
     pub proxy_connect_by_hostname: Option<bool>,
+    /// Existing ConfigMap in each sandbox namespace containing the corporate
+    /// proxy CA bundle under the `ca-bundle.pem` key.
+    pub proxy_ca_bundle_config_map_name: Option<String>,
     pub grpc_endpoint: String,
     pub ssh_socket_path: String,
     pub client_tls_secret_name: String,
@@ -457,6 +460,7 @@ impl Default for KubernetesComputeConfig {
             proxy_auth_secret_key: None,
             proxy_auth_allow_insecure: None,
             proxy_connect_by_hostname: None,
+            proxy_ca_bundle_config_map_name: None,
             grpc_endpoint: String::new(),
             ssh_socket_path: openshell_core::container_paths::SSH_SOCKET_PATH.to_string(),
             client_tls_secret_name: String::new(),
@@ -510,13 +514,15 @@ impl KubernetesComputeConfig {
     pub fn validate_upstream_proxy_config(&self) -> Result<(), String> {
         use openshell_core::driver_utils::{UpstreamProxyUrlError, parse_upstream_proxy_url};
 
-        if let Some(url) = &self.https_proxy {
+        let proxy_is_secure = if let Some(url) = &self.https_proxy {
             parse_upstream_proxy_url(url).map_err(|err| match err {
                 UpstreamProxyUrlError::Empty => "https_proxy must not be empty when set".to_string(),
                 UpstreamProxyUrlError::InlineCredentials => "https_proxy must not embed credentials in the URL; supply them through proxy_auth_secret_name and proxy_auth_secret_key".to_string(),
                 err => format!("https_proxy {err}"),
-            })?;
-        }
+            })?.secure
+        } else {
+            false
+        };
 
         if let Some(list) = self.no_proxy.as_deref() {
             if list.trim().is_empty() {
@@ -575,7 +581,7 @@ impl KubernetesComputeConfig {
                             .to_string(),
                     );
                 }
-                if self.proxy_auth_allow_insecure != Some(true) {
+                if !proxy_is_secure && self.proxy_auth_allow_insecure != Some(true) {
                     return Err("proxy credentials use cleartext Basic auth over the connection to the http:// proxy; set proxy_auth_allow_insecure = true to accept that exposure, or remove the credential Secret".to_string());
                 }
                 if self.topology == SupervisorTopology::Combined {
@@ -597,6 +603,30 @@ impl KubernetesComputeConfig {
             return Err(
                 "proxy_connect_by_hostname is set but no https_proxy is configured".to_string(),
             );
+        }
+        if let Some(name) = self.proxy_ca_bundle_config_map_name.as_deref() {
+            if name.trim().is_empty() {
+                return Err(
+                    "proxy_ca_bundle_config_map_name must not be empty when set".to_string()
+                );
+            }
+            if !is_dns1123_subdomain(name) {
+                return Err(
+                    "proxy_ca_bundle_config_map_name must be a valid Kubernetes DNS-1123 subdomain"
+                        .to_string(),
+                );
+            }
+            if self.https_proxy.is_none() {
+                return Err(
+                    "proxy_ca_bundle_config_map_name is set but no https_proxy is configured"
+                        .to_string(),
+                );
+            }
+            if self.topology != SupervisorTopology::Sidecar {
+                return Err(
+                    "proxy_ca_bundle_config_map_name requires topology = \"sidecar\"".to_string(),
+                );
+            }
         }
         Ok(())
     }
@@ -1398,6 +1428,7 @@ mod tests {
                 proxy_auth_secret_key = "credentials"
                 proxy_auth_allow_insecure = true
                 proxy_connect_by_hostname = true
+                proxy_ca_bundle_config_map_name = "corporate-proxy-ca"
             "#,
         )
         .unwrap();
@@ -1410,6 +1441,46 @@ mod tests {
             cfg.proxy_auth_secret_name.as_deref(),
             Some("corporate-proxy-auth")
         );
+        assert_eq!(
+            cfg.proxy_ca_bundle_config_map_name.as_deref(),
+            Some("corporate-proxy-ca")
+        );
+    }
+
+    #[test]
+    fn upstream_proxy_config_accepts_https_proxy_credentials_and_ca_bundle() {
+        let cfg = KubernetesComputeConfig {
+            topology: SupervisorTopology::Sidecar,
+            https_proxy: Some("https://proxy.corp.example:8443".to_string()),
+            proxy_auth_secret_name: Some("corporate-proxy-auth".to_string()),
+            proxy_auth_secret_key: Some("credentials".to_string()),
+            proxy_ca_bundle_config_map_name: Some("corporate-proxy-ca".to_string()),
+            ..KubernetesComputeConfig::default()
+        };
+        assert!(cfg.validate_upstream_proxy_config().is_ok());
+    }
+
+    #[test]
+    fn upstream_proxy_config_rejects_invalid_ca_bundle_config_map() {
+        for cfg in [
+            KubernetesComputeConfig {
+                proxy_ca_bundle_config_map_name: Some("corporate-proxy-ca".to_string()),
+                ..KubernetesComputeConfig::default()
+            },
+            KubernetesComputeConfig {
+                https_proxy: Some("https://proxy.corp.example:8443".to_string()),
+                proxy_ca_bundle_config_map_name: Some("Not_A_ConfigMap".to_string()),
+                ..KubernetesComputeConfig::default()
+            },
+            KubernetesComputeConfig {
+                https_proxy: Some("https://proxy.corp.example:8443".to_string()),
+                proxy_ca_bundle_config_map_name: Some("corporate-proxy-ca".to_string()),
+                ..KubernetesComputeConfig::default()
+            },
+        ] {
+            let error = cfg.validate_upstream_proxy_config().unwrap_err();
+            assert!(error.contains("proxy_ca_bundle_config_map_name"), "{error}");
+        }
     }
 
     #[test]

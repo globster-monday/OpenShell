@@ -225,6 +225,13 @@ kubectl -n openshell create secret generic corporate-proxy-auth \
 
 Add the proxy settings to your Helm values file. Replace the DNS suffixes and CIDRs in `noProxy` with values for your cluster. `noProxy` bypasses only the corporate proxy. OpenShell policy evaluation still applies.
 
+When the proxy uses a private CA or intercepts upstream TLS, create a ConfigMap in each sandbox namespace with the PEM bundle under `ca-bundle.pem`:
+
+```shell
+kubectl -n openshell create configmap corporate-proxy-ca \
+  --from-file=ca-bundle.pem=/path/to/corporate-ca-bundle.pem
+```
+
 ```yaml
 upstreamProxy:
   url: http://proxy.corp.example:8080
@@ -233,12 +240,13 @@ upstreamProxy:
     name: corporate-proxy-auth
     key: credentials
   authAllowInsecure: true
+  caBundleConfigMapName: corporate-proxy-ca
 
 supervisor:
   topology: sidecar
 ```
 
-Use `authAllowInsecure: true` only when you accept that Basic authentication is cleartext on the connection to an `http://` proxy. The initial release supports `http://` proxy endpoints and TLS CONNECT egress. It does not support HTTPS-to-proxy, custom corporate CA bundles, or forwarding plain HTTP egress through the proxy.
+Use `authAllowInsecure: true` only when you accept that Basic authentication is cleartext on the connection to an `http://` proxy. HTTPS proxy endpoints do not require this acknowledgement because the supervisor verifies TLS before sending the credential. HTTP and HTTPS proxy endpoints support TLS CONNECT egress; forwarding plain HTTP egress remains unsupported.
 
 Proxy credentials require `sidecar` topology. It mounts the credential only into the dedicated network supervisor container. OpenShell rejects credential Secrets with `combined` topology because Kubernetes `fsGroup` volume permission handling can make a shared credential mount readable by the sandbox group.
 

@@ -273,19 +273,25 @@ impl From<&KubernetesDriverVolumeMountConfig> for VolumeMount {
 
 const CLIENT_TLS_VOLUME_NAME: &str = "openshell-client-tls";
 const UPSTREAM_PROXY_AUTH_VOLUME_NAME: &str = "openshell-upstream-proxy-auth";
+const UPSTREAM_PROXY_CA_VOLUME_NAME: &str = "openshell-upstream-proxy-ca";
+const UPSTREAM_PROXY_CA_CONFIG_MAP_KEY: &str = "ca-bundle.pem";
 const SERVICE_ACCOUNT_TOKEN_VOLUME_NAME: &str = "openshell-sa-token";
 const SERVICE_ACCOUNT_TOKEN_MOUNT_PATH: &str = "/var/run/secrets/openshell";
 
 const KUBERNETES_DRIVER_RESERVED_VOLUME_NAMES: &[&str] = &[
     CLIENT_TLS_VOLUME_NAME,
     UPSTREAM_PROXY_AUTH_VOLUME_NAME,
+    UPSTREAM_PROXY_CA_VOLUME_NAME,
     SERVICE_ACCOUNT_TOKEN_VOLUME_NAME,
     SPIFFE_WORKLOAD_API_VOLUME_NAME,
     SUPERVISOR_VOLUME_NAME,
     WORKSPACE_VOLUME_NAME,
 ];
 
-const KUBERNETES_DRIVER_PROTECTED_MOUNT_PATHS: &[&str] = &[SERVICE_ACCOUNT_TOKEN_MOUNT_PATH];
+const KUBERNETES_DRIVER_PROTECTED_MOUNT_PATHS: &[&str] = &[
+    SERVICE_ACCOUNT_TOKEN_MOUNT_PATH,
+    openshell_core::driver_utils::PROXY_CA_MOUNT_PATH,
+];
 
 fn validate_kubernetes_driver_volumes(
     volumes: &[KubernetesDriverVolumeConfig],
@@ -1452,6 +1458,7 @@ impl KubernetesComputeDriver {
             proxy_auth_secret_key: self.config.proxy_auth_secret_key.as_deref(),
             proxy_auth_allow_insecure: self.config.proxy_auth_allow_insecure == Some(true),
             proxy_connect_by_hostname: self.config.proxy_connect_by_hostname == Some(true),
+            proxy_ca_bundle_config_map_name: self.config.proxy_ca_bundle_config_map_name.as_deref(),
             service_account_name: &self.config.service_account_name,
             sandbox_id: &sandbox.id,
             sandbox_name: &sandbox.name,
@@ -2702,6 +2709,12 @@ fn upstream_proxy_cli_args(params: &SandboxPodParams<'_>) -> Vec<String> {
     if params.proxy_connect_by_hostname {
         args.push("--upstream-proxy-connect-by-hostname".to_string());
     }
+    if has_upstream_proxy_ca_bundle(params) {
+        args.extend([
+            "--upstream-proxy-ca-bundle".to_string(),
+            openshell_core::driver_utils::PROXY_CA_MOUNT_PATH.to_string(),
+        ]);
+    }
     args
 }
 
@@ -2729,6 +2742,20 @@ fn upstream_proxy_auth_file_name() -> &'static str {
 
 fn has_upstream_proxy_credentials(params: &SandboxPodParams<'_>) -> bool {
     params.proxy_auth_secret_name.is_some() && params.proxy_auth_secret_key.is_some()
+}
+
+fn upstream_proxy_ca_volume_mount() -> serde_json::Value {
+    serde_json::json!({
+        "name": UPSTREAM_PROXY_CA_VOLUME_NAME,
+        "mountPath": openshell_core::driver_utils::PROXY_CA_MOUNT_PATH,
+        "subPath": UPSTREAM_PROXY_CA_CONFIG_MAP_KEY,
+        "readOnly": true,
+    })
+}
+
+fn has_upstream_proxy_ca_bundle(params: &SandboxPodParams<'_>) -> bool {
+    params.topology == SupervisorTopology::Sidecar
+        && params.proxy_ca_bundle_config_map_name.is_some()
 }
 
 fn sidecar_state_volume_mount() -> serde_json::Value {
@@ -2894,6 +2921,12 @@ fn supervisor_sidecar_container(
             .as_array_mut()
             .expect("volumeMounts is an array")
             .push(upstream_proxy_auth_volume_mount());
+    }
+    if has_upstream_proxy_ca_bundle(params) {
+        container["volumeMounts"]
+            .as_array_mut()
+            .expect("volumeMounts is an array")
+            .push(upstream_proxy_ca_volume_mount());
     }
     if let Some(profile) = params.app_armor_profile {
         container["securityContext"]["appArmorProfile"] = app_armor_profile_to_k8s(profile);
@@ -3292,6 +3325,7 @@ struct SandboxPodParams<'a> {
     proxy_auth_secret_key: Option<&'a str>,
     proxy_auth_allow_insecure: bool,
     proxy_connect_by_hostname: bool,
+    proxy_ca_bundle_config_map_name: Option<&'a str>,
     service_account_name: &'a str,
     sandbox_id: &'a str,
     sandbox_name: &'a str,
@@ -3333,6 +3367,7 @@ impl Default for SandboxPodParams<'_> {
             proxy_auth_secret_key: None,
             proxy_auth_allow_insecure: false,
             proxy_connect_by_hostname: false,
+            proxy_ca_bundle_config_map_name: None,
             service_account_name: DEFAULT_SANDBOX_SERVICE_ACCOUNT_NAME,
             sandbox_id: "",
             sandbox_name: "",
@@ -3769,6 +3804,21 @@ fn sandbox_template_to_k8s_with_validated_config(
                 "items": [{
                     "key": secret_key,
                     "path": upstream_proxy_auth_file_name(),
+                }]
+            }
+        }));
+    }
+    if has_upstream_proxy_ca_bundle(params)
+        && let Some(config_map_name) = params.proxy_ca_bundle_config_map_name
+    {
+        volumes.push(serde_json::json!({
+            "name": UPSTREAM_PROXY_CA_VOLUME_NAME,
+            "configMap": {
+                "name": config_map_name,
+                "defaultMode": 0o444,
+                "items": [{
+                    "key": UPSTREAM_PROXY_CA_CONFIG_MAP_KEY,
+                    "path": UPSTREAM_PROXY_CA_CONFIG_MAP_KEY,
                 }]
             }
         }));
@@ -7805,6 +7855,7 @@ mod tests {
             proxy_auth_secret_key: Some("credentials"),
             proxy_auth_allow_insecure: true,
             proxy_connect_by_hostname: true,
+            proxy_ca_bundle_config_map_name: Some("corporate-proxy-ca"),
             sandbox_uid: 1500,
             sandbox_gid: 1500,
             ..SandboxPodParams::default()
@@ -7842,6 +7893,14 @@ mod tests {
                 .iter()
                 .any(|arg| arg == "--upstream-proxy-connect-by-hostname")
         );
+        let ca_bundle_index = command
+            .iter()
+            .position(|arg| arg == "--upstream-proxy-ca-bundle")
+            .unwrap();
+        assert_eq!(
+            command[ca_bundle_index + 1],
+            openshell_core::driver_utils::PROXY_CA_MOUNT_PATH
+        );
         assert!(
             network["volumeMounts"]
                 .as_array()
@@ -7849,6 +7908,17 @@ mod tests {
                 .iter()
                 .any(|mount| mount["name"] == UPSTREAM_PROXY_AUTH_VOLUME_NAME)
         );
+        let ca_mount = network["volumeMounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|mount| mount["name"] == UPSTREAM_PROXY_CA_VOLUME_NAME)
+            .unwrap();
+        assert_eq!(
+            ca_mount["mountPath"],
+            openshell_core::driver_utils::PROXY_CA_MOUNT_PATH
+        );
+        assert_eq!(ca_mount["subPath"], UPSTREAM_PROXY_CA_CONFIG_MAP_KEY);
 
         let init = pod["spec"]["initContainers"]
             .as_array()
@@ -7888,6 +7958,18 @@ mod tests {
             upstream_proxy_auth_file_name()
         );
         assert_eq!(volume["secret"]["defaultMode"], 0o440);
+
+        let ca_volume = pod["spec"]["volumes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|volume| volume["name"] == UPSTREAM_PROXY_CA_VOLUME_NAME)
+            .unwrap();
+        assert_eq!(ca_volume["configMap"]["name"], "corporate-proxy-ca");
+        assert_eq!(
+            ca_volume["configMap"]["items"][0]["key"],
+            UPSTREAM_PROXY_CA_CONFIG_MAP_KEY
+        );
     }
 
     #[test]

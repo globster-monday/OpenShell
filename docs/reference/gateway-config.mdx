@@ -492,7 +492,7 @@ supervisor_sideload_method     = "image-volume"
 # pod-level network enforcement and gateway session handling into a network sidecar.
 topology                       = "combined"
 # Optional corporate HTTP forward proxy for policy-approved TLS egress. The
-# sandbox workload cannot select or override these settings. Only http:// proxy
+# sandbox workload cannot select or override these settings. HTTP and HTTPS proxy
 # endpoints and TLS CONNECT traffic are supported; plain HTTP egress remains
 # direct. `no_proxy` bypasses only the corporate proxy, never OpenShell policy.
 # https_proxy                  = "http://proxy.corp.example:8080"
@@ -517,6 +517,10 @@ topology                       = "combined"
 # Last resort for hostname-filtering proxy ACLs. The proxy resolves the target,
 # so its ACL becomes part of the egress boundary for proxied connections.
 # proxy_connect_by_hostname    = true
+# Optional ConfigMap in each sandbox namespace containing a PEM trust bundle
+# under the ca-bundle.pem key. OpenShell mounts it read-only into the network
+# supervisor and uses it for TLS to the proxy and intercepted upstream TLS.
+# proxy_ca_bundle_config_map_name = "corporate-proxy-ca"
 grpc_endpoint                  = "https://openshell-gateway.agents.svc:8080"
 ssh_socket_path                = "/run/openshell/ssh.sock"
 client_tls_secret_name         = "openshell-client-tls"

@@ -2574,6 +2574,8 @@ async fn compute_provider_env_revision_with_catalog_and_policy_bindings(
     let mut hasher = Sha256::new();
     hasher.update(b"openshell-provider-env-revision-v4");
 
+    let mut provider_names = provider_names.iter().collect::<Vec<_>>();
+    provider_names.sort();
     for provider_name in provider_names {
         hasher.update(provider_name.as_bytes());
         match store
@@ -2647,6 +2649,8 @@ fn compute_provider_env_revision_from_records_and_policy_bindings(
     let mut hasher = Sha256::new();
     hasher.update(b"openshell-provider-env-revision-v4");
 
+    let mut records = records.iter().collect::<Vec<_>>();
+    records.sort_by(|left, right| left.name.cmp(&right.name));
     for record in records {
         hasher.update(record.name.as_bytes());
         hasher.update(record.object_id.as_bytes());
@@ -10362,6 +10366,41 @@ mod tests {
         assert_eq!(
             second.environment.get("GITHUB_TOKEN"),
             Some(&"rotated".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_env_revision_is_independent_of_attached_provider_order() {
+        let state = test_server_state().await;
+        state
+            .store
+            .put_message(&test_provider("provider-alpha", "github"))
+            .await
+            .unwrap();
+        state
+            .store
+            .put_message(&test_provider("provider-beta", "github"))
+            .await
+            .unwrap();
+
+        let forward = compute_provider_env_revision(
+            state.store.as_ref(),
+            "default",
+            &["provider-alpha".to_string(), "provider-beta".to_string()],
+        )
+        .await
+        .unwrap();
+        let reverse = compute_provider_env_revision(
+            state.store.as_ref(),
+            "default",
+            &["provider-beta".to_string(), "provider-alpha".to_string()],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            forward, reverse,
+            "provider attachment order must not change the environment fingerprint"
         );
     }
 

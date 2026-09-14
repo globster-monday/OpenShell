@@ -17,7 +17,7 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tokio::net::unix::OwnedWriteHalf;
-use tokio::sync::{Mutex, broadcast, mpsc};
+use tokio::sync::{Mutex, broadcast, mpsc, watch};
 use tracing::{debug, info, warn};
 
 #[derive(Debug, Clone)]
@@ -71,28 +71,62 @@ pub enum ControlUpdate {
 pub struct Publisher {
     state: Arc<RwLock<BootstrapData>>,
     updates: broadcast::Sender<WireServerMessage>,
+    provider_env_applied: watch::Receiver<u64>,
 }
 
 impl Publisher {
-    pub fn publish_provider_env(&self, revision: u64, provider_child_env: HashMap<String, String>) {
-        let mut state = self.state.write().expect("sidecar control state poisoned");
-        if revision == state.provider_env_revision {
-            return;
-        }
-        state.provider_env_revision = revision;
-        state.provider_env_generation = state
-            .provider_env_generation
-            .checked_add(1)
-            .expect("sidecar provider environment generation overflow");
-        state.provider_child_env.clone_from(&provider_child_env);
+    pub async fn publish_provider_env(
+        &self,
+        revision: u64,
+        provider_child_env: HashMap<String, String>,
+        timeout: Duration,
+    ) -> Result<()> {
+        let (generation, changed) = {
+            let mut state = self.state.write().expect("sidecar control state poisoned");
+            if revision == state.provider_env_revision {
+                (state.provider_env_generation, false)
+            } else {
+                state.provider_env_revision = revision;
+                state.provider_env_generation = state
+                    .provider_env_generation
+                    .checked_add(1)
+                    .expect("sidecar provider environment generation overflow");
+                state.provider_child_env.clone_from(&provider_child_env);
+                (state.provider_env_generation, true)
+            }
+        };
 
-        // Keep generation assignment, bootstrap state, and publication under
-        // one lock so cloned publishers cannot emit generations out of order.
-        let _ = self.updates.send(WireServerMessage::ProviderEnvUpdated {
-            revision,
-            generation: state.provider_env_generation,
-            provider_child_env,
-        });
+        let mut applied = self.provider_env_applied.clone();
+        if *applied.borrow() >= generation {
+            return Ok(());
+        }
+
+        if changed {
+            self.updates
+                .send(WireServerMessage::ProviderEnvUpdated {
+                    revision,
+                    generation,
+                    provider_child_env,
+                })
+                .map_err(|_| miette::miette!("sidecar process supervisor is not connected"))?;
+        }
+
+        tokio::time::timeout(timeout, async {
+            while *applied.borrow_and_update() < generation {
+                applied.changed().await.map_err(|_| {
+                    miette::miette!("sidecar provider environment acknowledger closed")
+                })?;
+            }
+            Ok::<(), miette::Report>(())
+        })
+        .await
+        .map_err(|_| {
+            miette::miette!(
+                "timed out waiting for sidecar provider environment generation {generation}"
+            )
+        })??;
+
+        Ok(())
     }
 
     pub fn publish_policy(
@@ -176,6 +210,7 @@ enum WireClientMessage {
     BootstrapRequest { supervisor_pid: u32 },
     EntrypointStarted { pid: u32, instance_id: String },
     MainProcessExited { instance_id: String, exit_code: i32 },
+    ProviderEnvApplied { generation: u64 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -360,9 +395,11 @@ pub fn spawn_server(
     let state = Arc::new(RwLock::new(bootstrap));
     let (updates, _) = broadcast::channel(32);
     let (entrypoint_tx, entrypoint_rx) = mpsc::channel(8);
+    let (provider_env_applied_tx, provider_env_applied) = watch::channel(0);
     let publisher = Publisher {
         state: state.clone(),
         updates: updates.clone(),
+        provider_env_applied,
     };
 
     let connection_task = tokio::spawn(accept_authoritative_connection(
@@ -372,6 +409,7 @@ pub fn spawn_server(
         state,
         updates,
         entrypoint_tx,
+        provider_env_applied_tx,
     ));
     info!(path = %path.display(), "Sidecar control socket listening");
 
@@ -390,6 +428,7 @@ async fn accept_authoritative_connection(
     state: Arc<RwLock<BootstrapData>>,
     updates: broadcast::Sender<WireServerMessage>,
     entrypoint_tx: mpsc::Sender<EntrypointStarted>,
+    provider_env_applied_tx: watch::Sender<u64>,
 ) {
     let stream = match listener.accept().await {
         Ok((stream, _addr)) => stream,
@@ -414,7 +453,15 @@ async fn accept_authoritative_connection(
         );
     }
 
-    if let Err(err) = handle_connection(stream, expected_peer, state, updates, entrypoint_tx).await
+    if let Err(err) = handle_connection(
+        stream,
+        expected_peer,
+        state,
+        updates,
+        entrypoint_tx,
+        provider_env_applied_tx,
+    )
+    .await
     {
         warn!(error = %err, "Authoritative sidecar control connection closed");
     }
@@ -427,6 +474,7 @@ async fn handle_connection(
     state: Arc<RwLock<BootstrapData>>,
     updates: broadcast::Sender<WireServerMessage>,
     entrypoint_tx: mpsc::Sender<EntrypointStarted>,
+    provider_env_applied_tx: watch::Sender<u64>,
 ) -> Result<()> {
     let credentials = stream
         .peer_cred()
@@ -471,7 +519,8 @@ async fn handle_connection(
                 .map_err(|_| miette::miette!("sidecar entrypoint receiver closed"))?;
         }
         WireClientMessage::EntrypointStarted { .. }
-        | WireClientMessage::MainProcessExited { .. } => {
+        | WireClientMessage::MainProcessExited { .. }
+        | WireClientMessage::ProviderEnvApplied { .. } => {
             return Err(miette::miette!(
                 "sidecar control client sent entrypoint event before bootstrap"
             ));
@@ -526,6 +575,9 @@ async fn handle_connection(
                             })
                             .await
                             .map_err(|_| miette::miette!("sidecar entrypoint receiver closed"))?;
+                    }
+                    WireClientMessage::ProviderEnvApplied { generation } => {
+                        provider_env_applied_tx.send_replace(generation);
                     }
                 }
             }
@@ -640,6 +692,15 @@ pub async fn send_main_process_exited(
     write_json_line(&mut *writer, &message).await
 }
 
+pub async fn send_provider_env_applied(
+    writer: &Arc<Mutex<OwnedWriteHalf>>,
+    generation: u64,
+) -> Result<()> {
+    let message = WireClientMessage::ProviderEnvApplied { generation };
+    let mut writer = writer.lock().await;
+    write_json_line(&mut *writer, &message).await
+}
+
 async fn write_json_line<W, T>(writer: &mut W, value: &T) -> Result<()>
 where
     W: AsyncWrite + Unpin + Send,
@@ -739,10 +800,18 @@ mod tests {
             .await
             .unwrap();
 
-        publisher.publish_provider_env(
-            1,
-            HashMap::from([("TOKEN".to_string(), "second".to_string())]),
-        );
+        let publish = tokio::spawn({
+            let publisher = publisher.clone();
+            async move {
+                publisher
+                    .publish_provider_env(
+                        1,
+                        HashMap::from([("TOKEN".to_string(), "second".to_string())]),
+                        Duration::from_secs(1),
+                    )
+                    .await
+            }
+        });
 
         let update = tokio::time::timeout(Duration::from_secs(1), connection.updates.recv())
             .await
@@ -763,11 +832,19 @@ mod tests {
             }
             other => panic!("unexpected sidecar update: {other:?}"),
         }
+        send_provider_env_applied(&connection.writer, 8)
+            .await
+            .unwrap();
+        publish.await.unwrap().unwrap();
 
-        publisher.publish_provider_env(
-            1,
-            HashMap::from([("TOKEN".to_string(), "duplicate".to_string())]),
-        );
+        publisher
+            .publish_provider_env(
+                1,
+                HashMap::from([("TOKEN".to_string(), "duplicate".to_string())]),
+                Duration::from_secs(1),
+            )
+            .await
+            .unwrap();
         assert!(
             tokio::time::timeout(Duration::from_millis(50), connection.updates.recv())
                 .await
@@ -775,10 +852,18 @@ mod tests {
             "an identical fingerprint must remain a no-op"
         );
 
-        publisher.publish_provider_env(
-            u64::MAX,
-            HashMap::from([("TOKEN".to_string(), "third".to_string())]),
-        );
+        let publish = tokio::spawn({
+            let publisher = publisher.clone();
+            async move {
+                publisher
+                    .publish_provider_env(
+                        u64::MAX,
+                        HashMap::from([("TOKEN".to_string(), "third".to_string())]),
+                        Duration::from_secs(1),
+                    )
+                    .await
+            }
+        });
         let update = tokio::time::timeout(Duration::from_secs(1), connection.updates.recv())
             .await
             .unwrap()
@@ -798,6 +883,10 @@ mod tests {
             }
             other => panic!("unexpected sidecar update: {other:?}"),
         }
+        send_provider_env_applied(&connection.writer, 9)
+            .await
+            .unwrap();
+        publish.await.unwrap().unwrap();
     }
 
     #[tokio::test]

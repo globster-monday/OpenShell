@@ -1329,16 +1329,24 @@ fn static_credential_binding(
     endpoints: &[StaticCredentialEndpointBinding],
     authorization_epoch: Option<&str>,
 ) -> StaticCredentialBinding {
+    let authorization_scope = authorization_epoch
+        .map(|epoch| format!("refresh:{epoch}"))
+        .unwrap_or_else(|| "static".to_string());
     let workload_credential_handle = sandbox_id
-        .zip(authorization_epoch)
-        .map(|(sandbox_id, epoch)| {
-            derive_workload_credential_handle(sandbox_id, &record.object_id, key, epoch, endpoints)
+        .map(|sandbox_id| {
+            derive_workload_credential_handle(
+                sandbox_id,
+                &record.object_id,
+                key,
+                &authorization_scope,
+                endpoints,
+            )
         })
         .unwrap_or_default();
-    let credential_identity = if workload_credential_handle.is_empty() {
-        format!("{}:{key}", record.object_id)
-    } else {
+    let credential_identity = if authorization_epoch.is_some() {
         format!("refresh:{workload_credential_handle}")
+    } else {
+        format!("{}:{key}", record.object_id)
     };
     StaticCredentialBinding {
         endpoints: endpoints.to_vec(),
@@ -9114,6 +9122,37 @@ mod tests {
             first
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        );
+    }
+
+    #[test]
+    fn static_provider_credentials_receive_stable_workload_handles() {
+        let record = ProviderEnvironmentRecord {
+            name: "provider-a".to_string(),
+            object_id: "provider-object-a".to_string(),
+            resource_version: 1,
+            provider: Provider::default(),
+            refresh_states: Vec::new(),
+        };
+        let endpoints = vec![StaticCredentialEndpointBinding {
+            host: "api.example.com".to_string(),
+            port: 443,
+            path: "/**".to_string(),
+        }];
+
+        let binding =
+            static_credential_binding(Some("sandbox-a"), &record, "API_KEY", &endpoints, None);
+
+        assert_eq!(binding.workload_credential_handle.len(), 64);
+        assert_eq!(
+            binding.credential_identity, "provider-object-a:API_KEY",
+            "manual credential rotation retains the provider credential identity"
+        );
+        assert_eq!(
+            binding.workload_credential_handle,
+            static_credential_binding(Some("sandbox-a"), &record, "API_KEY", &endpoints, None,)
+                .workload_credential_handle,
+            "a static credential value update must preserve the running workload handle"
         );
     }
 

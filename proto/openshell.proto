@@ -1898,11 +1898,11 @@ message StaticCredentialBinding {
   // Supervisors use it to retain old revision placeholders only across
   // rotations of the same provider credential.
   string credential_identity = 2;
-  // Opaque gateway-issued handle for a refresh-managed credential identity
-  // epoch. When non-empty, supervisors keep the workload placeholder stable
-  // across access-token rotations and replace only the resolver value. The
-  // handle changes when the sandbox, provider, credential key, refresh
-  // authorization epoch, or endpoint authorization boundary changes.
+  // Opaque gateway-issued handle for a credential authorization identity.
+  // When non-empty, supervisors keep the workload placeholder stable across
+  // credential rotations and replace only the resolver value. The handle
+  // changes when the sandbox, provider, credential key, refresh authorization
+  // epoch, or endpoint authorization boundary changes.
   string workload_credential_handle = 3;
 }
 

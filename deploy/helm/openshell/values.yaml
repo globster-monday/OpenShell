@@ -65,7 +65,7 @@ supervisor:
 # -- Operator-owned corporate forward proxy for policy-approved TLS egress
 # from Kubernetes sandboxes. The workload cannot select or override it.
 upstreamProxy:
-  # -- HTTP proxy URL in http://host:port form. HTTPS-to-proxy is not supported.
+  # -- Proxy URL in http://host:port or https://host:port form.
   url: ""
   # -- Comma-separated destinations that bypass only the corporate proxy.
   noProxy: ""
@@ -78,6 +78,9 @@ upstreamProxy:
   authAllowInsecure: false
   # -- Last-resort option for hostname-filtering proxy ACLs. It lets the proxy resolve CONNECT targets.
   connectByHostname: false
+  # -- Existing ConfigMap in each sandbox namespace containing a PEM CA bundle
+  # under the ca-bundle.pem key. The bundle is mounted only into the network supervisor.
+  caBundleConfigMapName: ""
 
 # -- Image pull secrets attached to gateway and helper pods.
 imagePullSecrets: []

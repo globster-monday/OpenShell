@@ -209,7 +209,7 @@ impl SecretResolver {
     }
 
     /// Build workload environment and resolver snapshots with gateway-issued
-    /// stable handles for selected refresh-managed credentials.
+    /// stable handles for selected endpoint-bound credentials.
     ///
     /// Stable credentials are registered only in the current resolver. Their
     /// previous values never enter the bounded revision-generation queue, so a

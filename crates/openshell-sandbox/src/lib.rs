@@ -370,9 +370,15 @@ pub async fn run_sandbox(
         .map_or(0, |bootstrap| bootstrap.provider_env_generation);
     let mut process_control_closed = None;
     if let Some(connection) = process_control_connection {
+        sidecar_control::send_provider_env_applied(
+            &connection.writer,
+            initial_provider_env_generation,
+        )
+        .await?;
         process_control_closed = Some(connection.closed);
         spawn_sidecar_control_update_watcher(
             connection.updates,
+            Some(connection.writer),
             provider_credentials.clone(),
             agent_proposals.clone(),
             Arc::clone(&process_exit_ack),
@@ -1214,6 +1220,7 @@ fn load_policy_from_sidecar_bootstrap(
 
 fn spawn_sidecar_control_update_watcher(
     mut updates: tokio::sync::mpsc::UnboundedReceiver<sidecar_control::ControlUpdate>,
+    writer: Option<Arc<tokio::sync::Mutex<tokio::net::unix::OwnedWriteHalf>>>,
     provider_credentials: ProviderCredentialState,
     agent_proposals: AgentProposals,
     exit_ack: MainProcessExitAckWaiter,
@@ -1233,6 +1240,18 @@ fn spawn_sidecar_control_update_watcher(
                     let env_count = provider_credentials
                         .install_child_env_snapshot(revision, provider_child_env);
                     provider_env_generation = generation;
+                    if let Some(writer) = writer.as_ref()
+                        && let Err(error) =
+                            sidecar_control::send_provider_env_applied(writer, generation).await
+                    {
+                        warn!(
+                            error = %error,
+                            provider_env_revision = revision,
+                            provider_env_generation = generation,
+                            "Failed to acknowledge sidecar provider environment"
+                        );
+                        continue;
+                    }
                     ocsf_emit!(
                         ConfigStateChangeBuilder::new(ocsf_ctx())
                             .severity(SeverityId::Informational)
@@ -2996,10 +3015,13 @@ fn unchanged_policy_revision_candidate(
 
 fn unchanged_policy_revision_ready_to_ack(
     candidate: Option<u32>,
+    provider_env_reconciled: bool,
     policy_runtime_changed: bool,
     policy_runtime_reconciled: bool,
 ) -> Option<u32> {
-    candidate.filter(|_| !policy_runtime_changed || policy_runtime_reconciled)
+    candidate.filter(|_| {
+        provider_env_reconciled && (!policy_runtime_changed || policy_runtime_reconciled)
+    })
 }
 
 /// Whether the credential-provenance gates cannot apply to the loaded policy.
@@ -3861,6 +3883,7 @@ async fn run_policy_poll_loop_with_client<C: PolicyGatewayClient>(
             &result,
         );
         let mut policy_runtime_reconciled = false;
+        let mut provider_env_reconciled = !provider_env_changed;
 
         // A local policy override is not coupled to the gateway policy
         // snapshot, so its service registry can still be reconciled alone.
@@ -3971,10 +3994,24 @@ async fn run_policy_poll_loop_with_client<C: PolicyGatewayClient>(
                         let child_env = ctx.provider_credentials.child_env_with_gcp_resolved();
                         let env_count = child_env.len();
                         if let Some(publisher) = ctx.sidecar_control_publisher.as_ref() {
-                            publisher
-                                .publish_provider_env(provider_env_revision, child_env.clone());
+                            if let Err(error) = publisher
+                                .publish_provider_env(
+                                    provider_env_revision,
+                                    child_env.clone(),
+                                    Duration::from_secs(SIDECAR_READY_TIMEOUT_SECS),
+                                )
+                                .await
+                            {
+                                warn!(
+                                    error = %error,
+                                    provider_env_revision,
+                                    "Settings poll: process supervisor did not apply provider environment"
+                                );
+                                continue;
+                            }
                         }
                         current_provider_env_revision = provider_env_revision;
+                        provider_env_reconciled = true;
                         ocsf_emit!(
                             ConfigStateChangeBuilder::new(ocsf_ctx())
                                 .severity(SeverityId::Informational)
@@ -4013,7 +4050,7 @@ async fn run_policy_poll_loop_with_client<C: PolicyGatewayClient>(
             }
         }
 
-        if policy_runtime_changed {
+        if policy_runtime_changed && provider_env_reconciled {
             let pid = ctx.entrypoint_pid.load(Ordering::Acquire);
             let runtime_result = reload_gateway_policy_runtime(
                 &ctx.opa_engine,
@@ -4225,6 +4262,7 @@ async fn run_policy_poll_loop_with_client<C: PolicyGatewayClient>(
 
         if let Some(version) = unchanged_policy_revision_ready_to_ack(
             unchanged_policy_revision,
+            provider_env_reconciled,
             policy_runtime_changed,
             policy_runtime_reconciled,
         ) {
@@ -4508,6 +4546,7 @@ mod tests {
         let agent_proposals = AgentProposals::new(true);
         let handle = spawn_sidecar_control_update_watcher(
             rx,
+            None,
             provider_credentials.clone(),
             agent_proposals.clone(),
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -4629,6 +4668,7 @@ mod tests {
         let agent_proposals = AgentProposals::new(true);
         let handle = spawn_sidecar_control_update_watcher(
             rx,
+            None,
             provider_credentials,
             agent_proposals.clone(),
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -5948,22 +5988,27 @@ network_policies:
     #[test]
     fn unchanged_policy_revision_waits_for_required_runtime_reconciliation() {
         assert_eq!(
-            unchanged_policy_revision_ready_to_ack(Some(2), false, false),
+            unchanged_policy_revision_ready_to_ack(Some(2), true, false, false),
             Some(2),
             "a same-hash revision needs no OPA reload"
         );
         assert_eq!(
-            unchanged_policy_revision_ready_to_ack(Some(2), true, false),
+            unchanged_policy_revision_ready_to_ack(Some(2), false, false, false),
+            None,
+            "a failed provider refresh must keep the revision pending"
+        );
+        assert_eq!(
+            unchanged_policy_revision_ready_to_ack(Some(2), true, true, false),
             None,
             "failed runtime reconciliation must keep the revision pending"
         );
         assert_eq!(
-            unchanged_policy_revision_ready_to_ack(Some(2), true, true),
+            unchanged_policy_revision_ready_to_ack(Some(2), true, true, true),
             Some(2),
             "successful runtime reconciliation permits acknowledgement"
         );
         assert_eq!(
-            unchanged_policy_revision_ready_to_ack(None, false, true),
+            unchanged_policy_revision_ready_to_ack(None, true, false, true),
             None,
             "runtime success cannot manufacture a revision candidate"
         );

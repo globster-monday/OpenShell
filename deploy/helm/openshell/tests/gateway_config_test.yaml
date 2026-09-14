@@ -164,6 +164,7 @@ tests:
       upstreamProxy.authSecret.key: credentials
       upstreamProxy.authAllowInsecure: true
       upstreamProxy.connectByHostname: true
+      upstreamProxy.caBundleConfigMapName: corporate-proxy-ca
     asserts:
       - matchRegex:
           path: data["gateway.toml"]
@@ -183,6 +184,9 @@ tests:
       - matchRegex:
           path: data["gateway.toml"]
           pattern: 'proxy_connect_by_hostname\s*=\s*true'
+      - matchRegex:
+          path: data["gateway.toml"]
+          pattern: 'proxy_ca_bundle_config_map_name\s*=\s*"corporate-proxy-ca"'
 
   - it: uses the gateway built-in supervisor image by default
     template: templates/gateway-config.yaml
