@@ -169,7 +169,7 @@ struct Args {
     #[arg(long, env = "OPENSHELL_UPSTREAM_PROXY_CONNECT_BY_HOSTNAME", action = ArgAction::SetTrue)]
     proxy_connect_by_hostname: bool,
 
-    /// ConfigMap containing the corporate proxy CA bundle as ca-bundle.pem.
+    /// `ConfigMap` containing the corporate proxy CA bundle as ca-bundle.pem.
     #[arg(long, env = "OPENSHELL_UPSTREAM_PROXY_CA_BUNDLE_CONFIG_MAP_NAME")]
     proxy_ca_bundle_config_map_name: Option<String>,
 
