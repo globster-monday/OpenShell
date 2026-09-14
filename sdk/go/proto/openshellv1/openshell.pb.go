@@ -7798,11 +7798,11 @@ type StaticCredentialBinding struct {
 	// Supervisors use it to retain old revision placeholders only across
 	// rotations of the same provider credential.
 	CredentialIdentity string `protobuf:"bytes,2,opt,name=credential_identity,json=credentialIdentity,proto3" json:"credential_identity,omitempty"`
-	// Opaque gateway-issued handle for a refresh-managed credential identity
-	// epoch. When non-empty, supervisors keep the workload placeholder stable
-	// across access-token rotations and replace only the resolver value. The
-	// handle changes when the sandbox, provider, credential key, refresh
-	// authorization epoch, or endpoint authorization boundary changes.
+	// Opaque gateway-issued handle for a credential authorization identity.
+	// When non-empty, supervisors keep the workload placeholder stable across
+	// credential rotations and replace only the resolver value. The handle
+	// changes when the sandbox, provider, credential key, refresh authorization
+	// epoch, or endpoint authorization boundary changes.
 	WorkloadCredentialHandle string `protobuf:"bytes,3,opt,name=workload_credential_handle,json=workloadCredentialHandle,proto3" json:"workload_credential_handle,omitempty"`
 	unknownFields            protoimpl.UnknownFields
 	sizeCache                protoimpl.SizeCache
