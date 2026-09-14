@@ -81,7 +81,7 @@ jobs:
     if: needs.pr_metadata.outputs.should_run == 'true' && needs.helm_changes.outputs.should_run == 'true'
     runs-on: ubuntu-24.04
     container:
-      image: ghcr.io/nvidia/openshell/ci:latest
+      image: ghcr.io/globster-monday/openshell/ci:latest
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}

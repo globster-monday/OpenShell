@@ -42,7 +42,7 @@ jobs:
     if: needs.pr_metadata.outputs.should_run == 'true'
     runs-on: ubuntu-24.04
     container:
-      image: ghcr.io/nvidia/openshell/ci:latest
+      image: ghcr.io/globster-monday/openshell/ci:latest
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -66,7 +66,7 @@ jobs:
     if: needs.pr_metadata.outputs.should_run == 'true'
     runs-on: ubuntu-24.04
     container:
-      image: ghcr.io/nvidia/openshell/ci:latest
+      image: ghcr.io/globster-monday/openshell/ci:latest
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -177,7 +177,7 @@ jobs:
         runner: [ubuntu-24.04, ubuntu-24.04-arm]
     runs-on: ${{ matrix.runner }}
     container:
-      image: ghcr.io/nvidia/openshell/ci:latest
+      image: ghcr.io/globster-monday/openshell/ci:latest
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -208,7 +208,7 @@ jobs:
     if: needs.pr_metadata.outputs.should_run == 'true'
     runs-on: ubuntu-24.04
     container:
-      image: ghcr.io/nvidia/openshell/ci:latest
+      image: ghcr.io/globster-monday/openshell/ci:latest
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -227,7 +227,7 @@ jobs:
     if: needs.pr_metadata.outputs.should_run == 'true'
     runs-on: ubuntu-24.04
     container:
-      image: ghcr.io/nvidia/openshell/ci:latest
+      image: ghcr.io/globster-monday/openshell/ci:latest
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -246,7 +246,7 @@ jobs:
     if: needs.pr_metadata.outputs.should_run == 'true'
     runs-on: ubuntu-24.04
     container:
-      image: ghcr.io/nvidia/openshell/ci:latest
+      image: ghcr.io/globster-monday/openshell/ci:latest
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
