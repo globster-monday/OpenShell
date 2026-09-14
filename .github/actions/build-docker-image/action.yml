@@ -23,6 +23,10 @@ inputs:
   image-tag:
     description: Docker image tag
     required: true
+  image-repository:
+    description: Repository prefix containing the component image
+    required: false
+    default: ghcr.io/nvidia/openshell
   github-token:
     description: Token used to push the image
     required: true
@@ -57,6 +61,7 @@ runs:
       shell: bash
       env:
         IMAGE_TAG: ${{ inputs.image-tag }}
+        IMAGE_REPOSITORY: ${{ inputs.image-repository }}
         INPUTS_PLATFORM: ${{ inputs.platform }}
         INPUTS_COMPONENT: ${{ inputs.component }}
         INPUTS_ARCH: ${{ inputs.arch }}
@@ -66,7 +71,7 @@ runs:
           --platform ${INPUTS_PLATFORM} \
           --file deploy/docker/Dockerfile.${INPUTS_COMPONENT} \
           --target ${INPUTS_COMPONENT} \
-          --tag ghcr.io/nvidia/openshell/${INPUTS_COMPONENT}:${IMAGE_TAG}-${INPUTS_ARCH} \
+          --tag ${IMAGE_REPOSITORY}/${INPUTS_COMPONENT}:${IMAGE_TAG}-${INPUTS_ARCH} \
           --cache-from type=gha,scope=${INPUTS_COMPONENT}-${INPUTS_ARCH} \
           --cache-to type=gha,mode=max,scope=${INPUTS_COMPONENT}-${INPUTS_ARCH} \
           --provenance=mode=min \

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import TYPE_CHECKING
 
 import grpc
@@ -118,6 +119,7 @@ def _proxy_connect_then_http():
                 import os
 
                 ctx = ssl.create_default_context()
+                ctx.minimum_version = ssl.TLSVersion.TLSv1_2
                 ca_file = os.environ.get("SSL_CERT_FILE")
                 if ca_file:
                     ctx.load_verify_locations(ca_file)
@@ -634,7 +636,9 @@ def test_l4_log_fields(
 
         # Verify OCSF shorthand fields in allow line
         assert "ALLOWED" in log, "Expected ALLOWED in OCSF shorthand"
-        assert "api.anthropic.com" in log, "Expected destination host in log"
+        assert re.search(
+            r"(?:^|\s)dst_endpoint=api\.anthropic\.com:443(?:\s|$)", log, re.MULTILINE
+        ), "Expected destination host in log"
         assert "engine:opa" in log, "Expected engine:opa in log context"
 
         # Verify deny line exists

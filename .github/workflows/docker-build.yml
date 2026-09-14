@@ -19,6 +19,10 @@ on:
         required: false
         type: string
         default: ""
+      image-repository:
+        required: false
+        type: string
+        default: ghcr.io/nvidia/openshell
       checkout-ref:
         required: false
         type: string
@@ -58,6 +62,7 @@ jobs:
           arch: ${{ matrix.arch }}
           platform: ${{ matrix.platform }}
           image-tag: ${{ inputs.image-tag || github.sha }}
+          image-repository: ${{ inputs.image-repository }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
   manifest:
@@ -78,9 +83,10 @@ jobs:
         shell: bash
         env:
           IMAGE_TAG: ${{ inputs.image-tag || github.sha }}
+          IMAGE_REPOSITORY: ${{ inputs.image-repository }}
           INPUTS_COMPONENT: ${{ inputs.component }}
         run: |
-          image=ghcr.io/nvidia/openshell/${INPUTS_COMPONENT}
+          image=${IMAGE_REPOSITORY}/${INPUTS_COMPONENT}
           docker buildx imagetools create \
             --prefer-index=false \
             --tag "$image:${IMAGE_TAG}" \
@@ -90,5 +96,5 @@ jobs:
       - name: Verify merged manifest SBOM attestation
         shell: bash
         env:
-          IMAGE_REF: ghcr.io/nvidia/openshell/${{ inputs.component }}:${{ inputs.image-tag || github.sha }}
+          IMAGE_REF: ${{ inputs.image-repository }}/${{ inputs.component }}:${{ inputs.image-tag || github.sha }}
         run: tasks/scripts/verify-image-sbom.sh "${IMAGE_REF}" --require-cargo

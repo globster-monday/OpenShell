@@ -201,6 +201,16 @@ struct RunArgs {
     #[arg(long, env = "OPENSHELL_GRPC_RATE_LIMIT_REQUESTS")]
     grpc_rate_limit_requests: Option<u64>,
 
+    /// Temporarily deliver policy-bound static credentials to supervisors that
+    /// predate endpoint-scoped credential bindings.
+    #[arg(
+        long,
+        env = "OPENSHELL_ALLOW_LEGACY_STATIC_CREDENTIALS",
+        default_value_t = false,
+        action = ArgAction::Set
+    )]
+    allow_legacy_static_credentials: bool,
+
     /// gRPC rate-limit window length in seconds. Set to 0 to disable.
     #[arg(long, env = "OPENSHELL_GRPC_RATE_LIMIT_WINDOW_SECONDS")]
     grpc_rate_limit_window_seconds: Option<u64>,
@@ -415,6 +425,7 @@ fn prepare_server_config(
             args.grpc_rate_limit_requests,
             args.grpc_rate_limit_window_seconds,
         )
+        .with_legacy_static_credentials(args.allow_legacy_static_credentials)
         .with_gateway_interceptors(
             file.as_ref()
                 .map(|f| f.openshell.gateway.interceptors.clone())

@@ -1,6 +1,8 @@
 name: Windows MSVC (build-only)
 on:
   workflow_dispatch:
+permissions:
+  contents: read
 jobs:
   x64:
     runs-on: windows-2025

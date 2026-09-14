@@ -837,6 +837,10 @@ pub struct Config {
     /// set, it must match the single enabled credential driver.
     pub default_credential_driver: Option<String>,
 
+    /// Temporarily deliver policy-bound static credentials to supervisors
+    /// that predate endpoint-scoped credential bindings.
+    pub allow_legacy_static_credentials: bool,
+
     /// TTL for SSH session tokens, in seconds. 0 disables expiry.
     pub ssh_session_ttl_secs: u64,
 
@@ -1195,6 +1199,7 @@ impl Config {
             compute_driver_endpoints: BTreeMap::new(),
             credential_drivers: Vec::new(),
             default_credential_driver: None,
+            allow_legacy_static_credentials: false,
             ssh_session_ttl_secs: default_ssh_session_ttl_secs(),
             grpc_rate_limit_requests: None,
             grpc_rate_limit_window_secs: None,
@@ -1283,6 +1288,13 @@ impl Config {
     #[must_use]
     pub fn with_default_credential_driver(mut self, driver: Option<impl Into<String>>) -> Self {
         self.default_credential_driver = driver.map(Into::into);
+        self
+    }
+
+    /// Enable the temporary static-credential bridge for legacy supervisors.
+    #[must_use]
+    pub const fn with_legacy_static_credentials(mut self, enabled: bool) -> Self {
+        self.allow_legacy_static_credentials = enabled;
         self
     }
 

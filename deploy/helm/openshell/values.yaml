@@ -207,6 +207,10 @@ server:
   # -- Enable anonymous OpenShell telemetry from the gateway and the sandbox
   # supervisors it launches.
   telemetryEnabled: true
+  # -- Temporarily deliver policy-bound static credentials to supervisors that
+  # predate endpoint-scoped credential bindings. Disabled by default; enable
+  # only while migrating legacy supervisors.
+  allowLegacyStaticCredentials: false
   # -- Namespace where sandbox pods are created. Defaults to the Helm release
   # namespace (.Release.Namespace) when left empty.
   sandboxNamespace: ""

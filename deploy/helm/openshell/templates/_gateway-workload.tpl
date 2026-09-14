@@ -78,6 +78,8 @@ spec:
         {{- end }}
         - name: OPENSHELL_TELEMETRY_ENABLED
           value: {{ .Values.server.telemetryEnabled | quote }}
+        - name: OPENSHELL_ALLOW_LEGACY_STATIC_CREDENTIALS
+          value: {{ .Values.server.allowLegacyStaticCredentials | quote }}
         {{- if .Values.server.providerTokenGrants.spiffe.enabled }}
         - name: OPENSHELL_GATEWAY_SPIFFE_WORKLOAD_API_SOCKET
           value: {{ .Values.server.providerTokenGrants.spiffe.workloadApiSocketPath | quote }}

@@ -78,6 +78,26 @@ tests:
             name: OPENSHELL_TELEMETRY_ENABLED
             value: "false"
 
+  - it: disables legacy static credentials by default
+    template: templates/statefulset.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: OPENSHELL_ALLOW_LEGACY_STATIC_CREDENTIALS
+            value: "false"
+
+  - it: enables legacy static credentials during supervisor migration
+    template: templates/statefulset.yaml
+    set:
+      server.allowLegacyStaticCredentials: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: OPENSHELL_ALLOW_LEGACY_STATIC_CREDENTIALS
+            value: "true"
+
   - it: renders OTLP tracing configuration when configured
     template: templates/gateway-config.yaml
     set:

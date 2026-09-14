@@ -3096,7 +3096,7 @@ pub(super) async fn handle_get_sandbox_provider_environment(
         )
         .await?;
 
-    if supports_static_credential_bindings {
+    if supports_static_credential_bindings || state.config.allow_legacy_static_credentials {
         let unbound_static_keys = provider_environment
             .static_credential_keys
             .iter()
@@ -3117,10 +3117,20 @@ pub(super) async fn handle_get_sandbox_provider_environment(
             provider_environment.credential_expires_at_ms.remove(&key);
             provider_environment.static_credential_keys.remove(&key);
         }
-    } else {
-        for key in &provider_environment.static_credential_keys {
-            provider_environment.environment.remove(key);
-            provider_environment.credential_expires_at_ms.remove(key);
+    }
+
+    if !supports_static_credential_bindings {
+        if state.config.allow_legacy_static_credentials {
+            warn!(
+                sandbox_id = %sandbox_id,
+                static_credential_count = provider_environment.static_credential_keys.len(),
+                "delivering policy-bound static provider credentials to legacy supervisor"
+            );
+        } else {
+            for key in &provider_environment.static_credential_keys {
+                provider_environment.environment.remove(key);
+                provider_environment.credential_expires_at_ms.remove(key);
+            }
         }
         provider_environment.static_credential_bindings.clear();
     }
@@ -9797,6 +9807,54 @@ mod tests {
 
         assert!(!response.environment.contains_key("GITHUB_TOKEN"));
         assert!(response.static_credential_bindings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn provider_environment_delivers_bound_static_credentials_during_legacy_transition() {
+        use openshell_core::proto::GetSandboxProviderEnvironmentRequest;
+
+        let mut state = test_server_state().await;
+        Arc::get_mut(&mut state)
+            .unwrap()
+            .config
+            .allow_legacy_static_credentials = true;
+        state
+            .store
+            .put_message(&test_provider("work-github", "github"))
+            .await
+            .unwrap();
+        state
+            .store
+            .put_message(&test_sandbox(
+                "sb-legacy-provider-env-transition",
+                "legacy-provider-env-transition",
+                test_policy_with_rule("sandbox_only", "sandbox.example.com"),
+                vec!["work-github".to_string()],
+            ))
+            .await
+            .unwrap();
+
+        let response = handle_get_sandbox_provider_environment(
+            &state,
+            with_user(Request::new(GetSandboxProviderEnvironmentRequest {
+                sandbox_id: "sb-legacy-provider-env-transition".to_string(),
+                supports_static_credential_bindings: false,
+            })),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+
+        assert_eq!(
+            response.environment.get("GITHUB_TOKEN"),
+            Some(&"ghp-test".to_string())
+        );
+        assert!(response.static_credential_bindings.is_empty());
+        assert!(
+            !response
+                .non_secret_environment_keys
+                .contains(&"GITHUB_TOKEN".to_string())
+        );
     }
 
     #[tokio::test]
