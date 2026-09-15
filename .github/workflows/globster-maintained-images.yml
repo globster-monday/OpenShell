@@ -103,8 +103,14 @@ jobs:
                 ;;
             esac
           done
+          all_images_published=true
+          for state in "${states[@]:0:6}"; do
+            [[ "$state" == true ]] || all_images_published=false
+          done
           if [[ "$published" -eq 0 ]]; then
             echo "state=publish" >>"$GITHUB_OUTPUT"
+          elif [[ "$all_images_published" == true && "${states[6]}" == false ]]; then
+            echo "state=publish-chart" >>"$GITHUB_OUTPUT"
           elif [[ "$published" -eq "${#states[@]}" ]]; then
             echo "state=already-published" >>"$GITHUB_OUTPUT"
           else
@@ -166,8 +172,10 @@ jobs:
   chart:
     needs: [preflight, gateway, supervisor]
     if: >-
-      always() && needs.preflight.outputs.state == 'publish' &&
-      needs.gateway.result == 'success' && needs.supervisor.result == 'success'
+      always() &&
+      (needs.preflight.outputs.state == 'publish-chart' ||
+      (needs.preflight.outputs.state == 'publish' &&
+      needs.gateway.result == 'success' && needs.supervisor.result == 'success'))
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
