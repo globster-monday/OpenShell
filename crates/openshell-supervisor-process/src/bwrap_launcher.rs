@@ -53,13 +53,19 @@ impl Drop for LauncherGuard {
 }
 
 #[allow(unsafe_code)]
-pub fn spawn_if_enabled() -> Result<Option<LauncherGuard>> {
+pub fn spawn_if_enabled(
+    policy: &SandboxPolicy,
+    identity: crate::process::ResolvedProcessIdentity,
+) -> Result<Option<LauncherGuard>> {
     if std::env::var(ENABLE_ENV).as_deref() != Ok("1") {
         return Ok(None);
     }
-    if unsafe { libc::geteuid() } == 0 {
+    let (uid, gid, _) = crate::process::resolve_filesystem_identity(policy, identity)?;
+    let uid = uid.unwrap_or_else(nix::unistd::geteuid).as_raw();
+    let gid = gid.unwrap_or_else(nix::unistd::getegid).as_raw();
+    if uid == 0 || gid == 0 {
         return Err(miette::miette!(
-            "experimental Bubblewrap launcher refuses to run as root"
+            "experimental Bubblewrap launcher requires a resolved non-root UID and GID"
         ));
     }
 
@@ -79,13 +85,16 @@ pub fn spawn_if_enabled() -> Result<Option<LauncherGuard>> {
     }
 
     let executable = std::env::current_exe().into_diagnostic()?;
-    let mut child = Command::new(executable)
+    let mut command = Command::new(executable);
+    command
         .arg(BWRAP_LAUNCHER_SUBCOMMAND)
         .arg(&socket)
         .env_clear()
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    configure_launcher_identity(&mut command, uid, gid);
+    let mut child = command
         .spawn()
         .into_diagnostic()
         .wrap_err("failed to start experimental Bubblewrap launcher")?;
@@ -107,6 +116,35 @@ pub fn spawn_if_enabled() -> Result<Option<LauncherGuard>> {
     Err(miette::miette!(
         "experimental Bubblewrap launcher socket did not become ready"
     ))
+}
+
+/// Only the freshly forked helper loses privileges; supervisor setup keeps its
+/// existing identity. No allocation or identity lookup occurs after fork.
+#[allow(unsafe_code)]
+fn configure_launcher_identity(command: &mut Command, uid: u32, gid: u32) {
+    unsafe {
+        command.pre_exec(move || {
+            if libc::geteuid() == 0 {
+                capctl::caps::bounding::clear()
+                    .map_err(|error| std::io::Error::from_raw_os_error(error.code()))?;
+                if libc::setgroups(0, std::ptr::null()) != 0
+                    || libc::setresgid(gid, gid, gid) != 0
+                    || libc::setresuid(uid, uid, uid) != 0
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+            } else if libc::geteuid() != uid || libc::getegid() != gid {
+                return Err(std::io::Error::from_raw_os_error(libc::EPERM));
+            }
+            capctl::caps::CapState::empty()
+                .set_current()
+                .map_err(|error| std::io::Error::from_raw_os_error(error.code()))?;
+            if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
 }
 
 #[allow(unsafe_code)]
@@ -416,6 +454,64 @@ fn apply_resource_limits() -> Result<()> {
 mod tests {
     use super::*;
     use std::net::Shutdown;
+
+    #[test]
+    fn launcher_child_uses_non_root_identity_without_capabilities() {
+        let root = nix::unistd::geteuid().is_root();
+        let uid = if root {
+            10001
+        } else {
+            nix::unistd::geteuid().as_raw()
+        };
+        let gid = if root {
+            10001
+        } else {
+            nix::unistd::getegid().as_raw()
+        };
+        let mut command = Command::new("/bin/cat");
+        command.arg("/proc/self/status");
+        configure_launcher_identity(&mut command, uid, gid);
+        let output = command.output().unwrap();
+        assert!(output.status.success());
+        let status = String::from_utf8(output.stdout).unwrap();
+        for (field, expected) in [
+            ("Uid:", format!("{uid} {uid} {uid} {uid}")),
+            ("Gid:", format!("{gid} {gid} {gid} {gid}")),
+            ("CapInh:", "0000000000000000".to_string()),
+            ("CapPrm:", "0000000000000000".to_string()),
+            ("CapEff:", "0000000000000000".to_string()),
+            ("CapAmb:", "0000000000000000".to_string()),
+            ("NoNewPrivs:", "1".to_string()),
+        ] {
+            let value = status
+                .lines()
+                .find_map(|line| line.strip_prefix(field))
+                .unwrap();
+            assert_eq!(
+                value.split_whitespace().collect::<Vec<_>>().join(" "),
+                expected
+            );
+        }
+        if root {
+            let bounding = status
+                .lines()
+                .find_map(|line| line.strip_prefix("CapBnd:"))
+                .unwrap();
+            assert_eq!(bounding.trim(), "0000000000000000");
+            let groups = status
+                .lines()
+                .find_map(|line| line.strip_prefix("Groups:"))
+                .unwrap();
+            assert!(
+                groups.trim().is_empty(),
+                "root supplementary groups must be cleared"
+            );
+            assert!(
+                nix::unistd::geteuid().is_root(),
+                "the supervisor must retain its setup identity"
+            );
+        }
+    }
 
     #[test]
     fn rejects_requests_that_select_launcher_options() {
