@@ -2101,7 +2101,7 @@ pub fn prepare_filesystem_with_identity(
 }
 
 #[cfg(unix)]
-fn resolve_filesystem_identity(
+pub(crate) fn resolve_filesystem_identity(
     policy: &SandboxPolicy,
     resolved_identity: ResolvedProcessIdentity,
 ) -> Result<(Option<Uid>, Option<Gid>, Vec<Gid>)> {

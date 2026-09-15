@@ -131,7 +131,8 @@ pub async fn run_process(
     // generated child receives the normal OpenShell Landlock/seccomp policy
     // after Bubblewrap has finished setup.
     #[cfg(target_os = "linux")]
-    let _bwrap_launcher = crate::bwrap_launcher::spawn_if_enabled()?;
+    let _bwrap_launcher =
+        crate::bwrap_launcher::spawn_if_enabled(policy, resolved_process_identity)?;
 
     // Install the supervisor seccomp prelude before spawning any workload-side
     // tasks. By this point the orchestrator has finished privileged startup
