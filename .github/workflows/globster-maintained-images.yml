@@ -87,10 +87,9 @@ jobs:
             "$(probe_image "$SUPERVISOR_REPOSITORY:$ARTIFACT_TAG-arm64")"
             "$(probe_chart)"
           )
-          published=0
           for state in "${states[@]}"; do
             case "$state" in
-              true) published=$((published + 1)) ;;
+              true) ;;
               false) ;;
               error)
                 echo "state=conflict" >>"$GITHUB_OUTPUT"
@@ -103,15 +102,28 @@ jobs:
                 ;;
             esac
           done
-          all_images_published=true
-          for state in "${states[@]:0:6}"; do
-            [[ "$state" == true ]] || all_images_published=false
+          gateway_published=true
+          gateway_absent=true
+          for state in "${states[@]:0:3}"; do
+            [[ "$state" == true ]] || gateway_published=false
+            [[ "$state" == false ]] || gateway_absent=false
           done
-          if [[ "$published" -eq 0 ]]; then
+          supervisor_published=true
+          supervisor_absent=true
+          for state in "${states[@]:3:3}"; do
+            [[ "$state" == true ]] || supervisor_published=false
+            [[ "$state" == false ]] || supervisor_absent=false
+          done
+          chart_published=${states[6]}
+          if [[ "$gateway_absent" == true && "$supervisor_absent" == true && "$chart_published" == false ]]; then
             echo "state=publish" >>"$GITHUB_OUTPUT"
-          elif [[ "$all_images_published" == true && "${states[6]}" == false ]]; then
+          elif [[ "$gateway_absent" == true && "$supervisor_published" == true && "$chart_published" == false ]]; then
+            echo "state=publish-gateway" >>"$GITHUB_OUTPUT"
+          elif [[ "$gateway_published" == true && "$supervisor_absent" == true && "$chart_published" == false ]]; then
+            echo "state=publish-supervisor" >>"$GITHUB_OUTPUT"
+          elif [[ "$gateway_published" == true && "$supervisor_published" == true && "$chart_published" == false ]]; then
             echo "state=publish-chart" >>"$GITHUB_OUTPUT"
-          elif [[ "$published" -eq "${#states[@]}" ]]; then
+          elif [[ "$gateway_published" == true && "$supervisor_published" == true && "$chart_published" == true ]]; then
             echo "state=already-published" >>"$GITHUB_OUTPUT"
           else
             echo "state=conflict" >>"$GITHUB_OUTPUT"
@@ -121,7 +133,9 @@ jobs:
 
   gateway-binaries:
     needs: preflight
-    if: needs.preflight.outputs.state == 'publish'
+    if: >-
+      needs.preflight.outputs.state == 'publish' ||
+      needs.preflight.outputs.state == 'publish-gateway'
     uses: globster-monday/OpenShell/.github/workflows/build-gateway-binaries.yml@a09f21509b9b95078db3309a8cd82b2b07c2a945
     with:
       cargo-version: 0.0.116-globster.1
@@ -131,7 +145,9 @@ jobs:
 
   supervisor-binaries:
     needs: preflight
-    if: needs.preflight.outputs.state == 'publish'
+    if: >-
+      needs.preflight.outputs.state == 'publish' ||
+      needs.preflight.outputs.state == 'publish-supervisor'
     uses: globster-monday/OpenShell/.github/workflows/build-sandbox-binaries.yml@a09f21509b9b95078db3309a8cd82b2b07c2a945
     with:
       cargo-version: 0.0.116-globster.1
@@ -142,9 +158,11 @@ jobs:
   gateway:
     needs: [preflight, gateway-binaries]
     if: >-
-      always() && needs.preflight.outputs.state == 'publish' &&
+      always() &&
+      (needs.preflight.outputs.state == 'publish' ||
+      needs.preflight.outputs.state == 'publish-gateway') &&
       needs.gateway-binaries.result == 'success'
-    uses: globster-monday/OpenShell/.github/workflows/docker-build.yml@a09f21509b9b95078db3309a8cd82b2b07c2a945
+    uses: globster-monday/OpenShell/.github/workflows/docker-build.yml@d61734aac5b7f25e8e91cfb4d5b44a83f99e567c
     with:
       component: gateway
       binary: openshell-gateway
@@ -157,9 +175,11 @@ jobs:
   supervisor:
     needs: [preflight, supervisor-binaries]
     if: >-
-      always() && needs.preflight.outputs.state == 'publish' &&
+      always() &&
+      (needs.preflight.outputs.state == 'publish' ||
+      needs.preflight.outputs.state == 'publish-supervisor') &&
       needs.supervisor-binaries.result == 'success'
-    uses: globster-monday/OpenShell/.github/workflows/docker-build.yml@a09f21509b9b95078db3309a8cd82b2b07c2a945
+    uses: globster-monday/OpenShell/.github/workflows/docker-build.yml@d61734aac5b7f25e8e91cfb4d5b44a83f99e567c
     with:
       component: supervisor
       binary: openshell-sandbox
@@ -174,6 +194,10 @@ jobs:
     if: >-
       always() &&
       (needs.preflight.outputs.state == 'publish-chart' ||
+      (needs.preflight.outputs.state == 'publish-gateway' &&
+      needs.gateway.result == 'success') ||
+      (needs.preflight.outputs.state == 'publish-supervisor' &&
+      needs.supervisor.result == 'success') ||
       (needs.preflight.outputs.state == 'publish' &&
       needs.gateway.result == 'success' && needs.supervisor.result == 'success'))
     runs-on: ubuntu-latest
