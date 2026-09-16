@@ -63,7 +63,9 @@ Each call creates private namespaces and bounded scratch filesystems. Only `/usr
 `/app/.venv`, the submitted program and the fixed child launcher are mounted
 read-only. Before Python starts, the child requires Landlock, blocks networking,
 and installs seccomp restrictions including denial of process/thread creation.
-Setup errors fail closed. The deadline terminates the Bubblewrap process tree;
+Landlock path descriptors use direct `O_PATH` opens so musl builds preserve the
+path-only flag, including for device nodes on nodev mounts. The fixed root also
+includes the amd64 `/lib64` loader link. Setup errors fail closed. The deadline terminates the Bubblewrap process tree;
 scratch mounts disappear with the namespace. Results are bounded stdout/stderr,
 with no file-export interface. See [Sandbox Limits](sandbox-limits.md).
 
