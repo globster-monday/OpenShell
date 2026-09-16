@@ -133,6 +133,11 @@ runs:
         # Reject symbols introduced after glibc 2.28.
         tasks/scripts/verify-glibc-symbols.sh 2.28 "$binary"
 
+    - name: Verify static supervisor Bubblewrap execution
+      if: inputs.binary == 'openshell-sandbox' && endsWith(inputs.triple, '-linux-musl')
+      shell: bash -euo pipefail {0}
+      run: tasks/scripts/test-bwrap-root-startup.sh target/release/openshell-sandbox
+
     - name: Upload ${{ inputs.binary }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
       with:

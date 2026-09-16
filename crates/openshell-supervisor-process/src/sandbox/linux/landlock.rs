@@ -4,12 +4,12 @@
 //! Landlock filesystem sandboxing.
 
 use landlock::{
-    ABI, Access, AccessFs, BitFlags, CompatLevel, Compatible, PathBeneath, PathFd, PathFdError,
-    Ruleset, RulesetAttr, RulesetCreatedAttr,
+    ABI, Access, AccessFs, BitFlags, CompatLevel, Compatible, PathBeneath, Ruleset, RulesetAttr,
+    RulesetCreatedAttr,
 };
 use miette::{IntoDiagnostic, Result};
 use openshell_core::policy::{LandlockCompatibility, SandboxPolicy};
-use std::os::fd::AsFd;
+use std::os::fd::{AsFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use tracing::debug;
 
@@ -88,7 +88,7 @@ pub fn probe_availability() -> LandlockAvailability {
 
 /// A prepared Landlock ruleset ready to be enforced via `restrict_self()`.
 ///
-/// Created by [`prepare`] while running as root (so `PathFd::new()` can open
+/// Created by [`prepare`] while running as root (so `open_path_fd()` can open
 /// any path regardless of DAC permissions). Enforced by [`enforce`] after
 /// `drop_privileges()` — `restrict_self()` does not require elevated privileges.
 pub struct PreparedRuleset {
@@ -102,9 +102,9 @@ enum PathOpenMode {
     CurrentUser,
 }
 
-/// Phase 1: Open `PathFds` and build the Landlock ruleset **as root**.
+/// Phase 1: Open path descriptors and build the Landlock ruleset **as root**.
 ///
-/// This must run before `drop_privileges()` so that `PathFd::new()` can open
+/// This must run before `drop_privileges()` so that `open_path_fd()` can open
 /// paths that are only accessible to root (e.g. mode 700 directories).
 ///
 /// Returns `None` if there are no filesystem paths to restrict (no-op).
@@ -351,9 +351,9 @@ pub fn apply(policy: &SandboxPolicy, workdir: Option<&str>) -> Result<()> {
 ///
 /// Landlock directory-only rights such as `ReadDir` are invalid for regular
 /// files and device nodes in hard-requirement mode. Classifying through the
-/// same `PathFd` used by the rule avoids a pathname TOCTOU race.
+/// same path descriptor used by the rule avoids a pathname TOCTOU race.
 fn access_for_path_fd(
-    path_fd: &PathFd,
+    path_fd: &OwnedFd,
     requested_access: BitFlags<AccessFs>,
     abi: ABI,
 ) -> Result<BitFlags<AccessFs>> {
@@ -376,16 +376,12 @@ fn try_open_path(
     path: &Path,
     compatibility: &LandlockCompatibility,
     path_open_mode: PathOpenMode,
-) -> Result<Option<PathFd>> {
-    match PathFd::new(path) {
+) -> Result<Option<OwnedFd>> {
+    match open_path_fd(path) {
         Ok(fd) => Ok(Some(fd)),
         Err(err) => {
-            let reason = classify_path_fd_error(&err);
-            let is_not_found = matches!(
-                &err,
-                PathFdError::OpenCall { source, .. }
-                    if source.kind() == std::io::ErrorKind::NotFound
-            );
+            let reason = classify_io_error(&err);
+            let is_not_found = err.kind() == std::io::ErrorKind::NotFound;
             if matches!(path_open_mode, PathOpenMode::CurrentUser) {
                 if is_not_found {
                     debug!(
@@ -451,17 +447,17 @@ fn try_open_path(
     }
 }
 
-/// Classify a [`PathFdError`] into a human-readable reason.
-///
-/// `PathFd::new()` wraps `open(path, O_PATH | O_CLOEXEC)` which can fail for
-/// several reasons beyond simple non-existence. The `PathFdError::OpenCall`
-/// variant wraps the underlying `std::io::Error`.
-fn classify_path_fd_error(err: &PathFdError) -> &'static str {
-    match err {
-        PathFdError::OpenCall { source, .. } => classify_io_error(source),
-        // PathFdError is #[non_exhaustive], handle future variants gracefully.
-        _ => "unexpected error",
-    }
+/// Open a path descriptor without Rust's `OpenOptions` access-mode masking.
+/// On musl, `O_ACCMODE` includes `O_PATH`, so the standard-library path strips
+/// `O_PATH` and accidentally opens the file for reading. Landlock needs only an
+/// inode reference, including for device nodes on a nodev mount.
+fn open_path_fd(path: &Path) -> std::io::Result<OwnedFd> {
+    rustix::fs::open(
+        path,
+        rustix::fs::OFlags::PATH | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(Into::into)
 }
 
 /// Classify a `std::io::Error` into a human-readable reason string.
@@ -523,7 +519,7 @@ mod tests {
         }
     }
     fn tailored_access(path: &Path, requested_access: BitFlags<AccessFs>) -> BitFlags<AccessFs> {
-        let path_fd = PathFd::new(path).unwrap();
+        let path_fd = open_path_fd(path).unwrap();
         access_for_path_fd(&path_fd, requested_access, ABI::V2).unwrap()
     }
 
@@ -671,11 +667,24 @@ mod tests {
     }
 
     #[test]
-    fn classify_path_fd_error_extracts_io_error() {
-        // Use PathFd::new on a non-existent path to get a real PathFdError
-        // (the OpenCall variant is #[non_exhaustive] and can't be constructed directly).
-        let err = PathFd::new("/nonexistent/openshell/classify/test").unwrap_err();
-        assert_eq!(classify_path_fd_error(&err), "path does not exist");
+    fn path_descriptor_keeps_o_path_and_close_on_exec() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let fd = open_path_fd(file.path()).unwrap();
+        assert!(
+            rustix::fs::fcntl_getfl(&fd)
+                .unwrap()
+                .contains(rustix::fs::OFlags::PATH)
+        );
+        assert!(
+            rustix::io::fcntl_getfd(&fd)
+                .unwrap()
+                .contains(rustix::io::FdFlags::CLOEXEC)
+        );
+        let mut byte = [0_u8];
+        assert_eq!(
+            rustix::io::read(&fd, &mut byte),
+            Err(rustix::io::Errno::BADF)
+        );
     }
 
     #[test]

@@ -37,3 +37,10 @@ session service. A passing run prints `root_started_supervisor: passed` and
 The process-crate unit test additionally verifies cleared supplementary groups
 and effective, permitted, inheritable, ambient, and bounding capabilities in the
 helper launched from root, while the supervisor keeps its setup identity.
+
+The static supervisor binary build runs `tasks/scripts/test-bwrap-root-startup.sh`
+on both native amd64 and arm64 runners before uploading its artifact. This uses
+an immutable Python base, a real non-root Bubblewrap run, and mandatory Landlock.
+On AppArmor-enabled CI hosts, a temporary named container profile permits userns
+setup; it is removed after the disposable container exits. Staging acceptance
+separately verifies the stricter node-level Bubblewrap/child profiles.
