@@ -16,12 +16,12 @@ from typing import Any
 
 SCHEMA_VERSION = 1
 SOURCE_REPOSITORY = "globster-monday/OpenShell"
-SOURCE_COMMIT = "c8f1b024dfdf98735d6a7633f578f36c0309d8ab"
-SOURCE_TREE = "9dfa61aff4c1f971722d749871bdbe4aa5e8a163"
+SOURCE_COMMIT = "ded1222c71b583b3a41c72f2722174972f876ddd"
+SOURCE_TREE = "2f894cc49f1aa5ac00f89862458d7f3cf31bf01b"
 OPENSHELL_VERSION = "0.0.116"
-CARGO_VERSION = "0.0.116-globster.3"
-ARTIFACT_TAG = "0.0.116-globster-c8f1b024"
-CHART_VERSION = "0.0.116-globster.3"
+CARGO_VERSION = "0.0.116-globster.4"
+ARTIFACT_TAG = "0.0.116-globster-ded1222c"
+CHART_VERSION = "0.0.116-globster.4"
 GATEWAY_REPOSITORY = "ghcr.io/globster-monday/openshell/gateway"
 SUPERVISOR_REPOSITORY = "ghcr.io/globster-monday/openshell/supervisor"
 CHART_REPOSITORY = "oci://ghcr.io/globster-monday/openshell/helm-chart"
