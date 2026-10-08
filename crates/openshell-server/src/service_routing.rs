@@ -149,7 +149,7 @@ pub async fn proxy_sandbox_service_request(
         return StatusCode::NOT_FOUND.into_response();
     };
 
-    if let Err(status) = authorize_service_request(&state, &req, &workspace).await {
+    if let Err(status) = authorize_service_request(&state, req.headers(), &workspace).await {
         return service_auth_error_response(&state, &req, &sandbox_name, &service_name, status);
     }
 
@@ -159,9 +159,10 @@ pub async fn proxy_sandbox_service_request(
     }
 }
 
+#[allow(clippy::result_large_err)]
 async fn authorize_service_request(
     state: &ServerState,
-    req: &Request<Body>,
+    headers: &HeaderMap,
     workspace: &str,
 ) -> Result<(), tonic::Status> {
     let Some(oidc) = state.config.oidc.as_ref() else {
@@ -173,7 +174,7 @@ async fn authorize_service_request(
         .clone()
         .ok_or_else(|| tonic::Status::unavailable("OIDC authentication unavailable"))?;
     let principal = OidcAuthenticator::new(cache)
-        .authenticate(req.headers(), SERVICE_ROUTE_AUTHZ_METHOD)
+        .authenticate(headers, SERVICE_ROUTE_AUTHZ_METHOD)
         .await?
         .ok_or_else(|| tonic::Status::unauthenticated("user authentication required"))?;
     let Principal::User(ref user) = principal else {
