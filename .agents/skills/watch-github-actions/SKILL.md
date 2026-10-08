@@ -205,6 +205,13 @@ gh run rerun <run-id>
 
 ## Example Workflow
 
+For an owned branch in `globster-monday/OpenShell`, dispatch `branch-checks.yml` and
+`helm-lint.yml` with `--repo globster-monday/OpenShell --ref <branch>`. After they
+finish, dispatch `required-ci-gates.yml` on that same ref with `-f pull_request=<number>`.
+The gate verifies successful real jobs for the exact PR head; upstream PRs retain
+their `/ok` mirror workflow. GitHub default CodeQL owns the fork's Code Scanning
+uploads; the inherited advanced workflow also retains its analysis as SARIF artifacts.
+
 1. Push your changes and create/update a PR
 2. Watch the workflow run:
    ```bash
