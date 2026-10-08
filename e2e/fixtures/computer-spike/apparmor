@@ -1,0 +1,34 @@
+# Namespace privileges are confined to Bubblewrap. Every child is stacked with
+# a profile that denies capabilities, network, mounts and further userns creation.
+abi <abi/4.0>,
+profile computer-spike-330302 /usr/bin/spike-bwrap flags=(attach_disconnected,mediate_deleted) {
+  capability,
+  /{**,} rwlkm,
+  network netlink raw,
+  unix,
+  signal,
+  ptrace,
+  userns,
+  mount,
+  umount,
+  pivot_root,
+  # Like the upstream bwrap profile, inherit when the executable has no
+  # dedicated profile, while always stacking the restrictive child profile.
+  /** pix -> &computer-spike-330302//&computer-spike-330302-child,
+}
+profile computer-spike-330302-child flags=(attach_disconnected,mediate_deleted) {
+  /{**,} rwlkm,
+  /** ix,
+  signal,
+  audit deny capability,
+  unix,
+  audit deny network inet,
+  audit deny network inet6,
+  audit deny network netlink,
+  audit deny network packet,
+  audit deny userns,
+  audit deny mount,
+  audit deny umount,
+  audit deny pivot_root,
+  audit deny ptrace,
+}
