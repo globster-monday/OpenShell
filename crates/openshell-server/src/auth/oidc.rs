@@ -768,4 +768,262 @@ mod tests {
             .await
             .expect_err("a token naming a kid absent from the JWKS must be rejected");
     }
+
+    // Exercise the service routers with the same signed JWT/JWKS fixture as
+    // gRPC authentication, without a cluster or an upstream application.
+    mod service_routes {
+        use super::*;
+        use axum::body::{Body, to_bytes};
+        use http::{Request, StatusCode, header};
+        use openshell_core::proto::datamodel::v1::ObjectMeta;
+        use openshell_core::proto::{
+            Sandbox, SandboxPhase, SandboxStatus, ServiceEndpoint, WorkspaceMember, WorkspaceRole,
+        };
+        use tower::ServiceExt;
+
+        async fn fixture() -> (wiremock::MockServer, Arc<crate::ServerState>) {
+            let server = wiremock::MockServer::start().await;
+            let cache = Arc::new(cache_with_mock_issuer(&server).await);
+            let store = Arc::new(crate::persistence::test_store().await);
+            let compute = crate::compute::new_test_runtime(store.clone()).await;
+            let mut config = openshell_core::Config::new(None)
+                .with_server_sans(["*.dev.openshell.localhost"])
+                .with_credential_drivers(["test-static"]);
+            config.oidc = Some(OidcConfig {
+                issuer: server.uri(),
+                audience: TEST_AUDIENCE.to_string(),
+                jwks_ttl_secs: 3600,
+                roles_claim: "realm_access.roles".to_string(),
+                admin_role: "openshell-admin".to_string(),
+                user_role: "openshell-user".to_string(),
+                scopes_claim: "scope".to_string(),
+            });
+            let state = crate::ServerState::new(
+                config,
+                store,
+                compute,
+                crate::sandbox_index::SandboxIndex::new(),
+                crate::sandbox_watch::SandboxWatchBus::new(),
+                crate::tracing_bus::TracingLogBus::new(),
+                Arc::new(crate::supervisor_session::SupervisorSessionRegistry::new()),
+                Some(cache),
+            );
+            (server, Arc::new(state))
+        }
+
+        fn metadata(id: &str, name: &str, workspace: &str) -> ObjectMeta {
+            ObjectMeta {
+                id: id.to_string(),
+                name: name.to_string(),
+                workspace: workspace.to_string(),
+                ..ObjectMeta::default()
+            }
+        }
+
+        async fn add_member(state: &crate::ServerState) {
+            state
+                .store
+                .put_message(&WorkspaceMember {
+                    metadata: Some(metadata("member-1", "user-42", "default")),
+                    principal_subject: "user-42".to_string(),
+                    role: WorkspaceRole::User.into(),
+                })
+                .await
+                .unwrap();
+        }
+
+        async fn add_endpoint(state: &crate::ServerState, sandbox_workspace: &str) {
+            state
+                .store
+                .put_message(&Sandbox {
+                    metadata: Some(metadata("sandbox-1", "my-sandbox", sandbox_workspace)),
+                    status: Some(SandboxStatus {
+                        phase: SandboxPhase::Provisioning.into(),
+                        ..SandboxStatus::default()
+                    }),
+                    ..Sandbox::default()
+                })
+                .await
+                .unwrap();
+            state
+                .store
+                .put_message(&ServiceEndpoint {
+                    metadata: Some(metadata("endpoint-1", "my-sandbox--web", "default")),
+                    sandbox_id: "sandbox-1".to_string(),
+                    sandbox_name: "my-sandbox".to_string(),
+                    service_name: "web".to_string(),
+                    target_port: 8080,
+                    domain: true,
+                })
+                .await
+                .unwrap();
+        }
+
+        async fn request(
+            state: Arc<crate::ServerState>,
+            token: Option<&str>,
+            workspace: &str,
+            websocket: bool,
+            loopback: bool,
+        ) -> axum::response::Response {
+            let router = if loopback {
+                crate::http::service_http_router(state)
+            } else {
+                crate::http::http_router(state)
+            };
+            let mut request = Request::builder().uri("/private?secret=do-not-log").header(
+                header::HOST,
+                format!("{workspace}--my-sandbox--web.dev.openshell.localhost"),
+            );
+            if let Some(token) = token {
+                request = request.header(header::AUTHORIZATION, format!("Bearer {token}"));
+            }
+            if websocket {
+                request = request
+                    .header(header::CONNECTION, "Upgrade")
+                    .header(header::UPGRADE, "websocket");
+            }
+            router
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap()
+        }
+
+        #[tokio::test]
+        async fn missing_invalid_and_sandbox_bearers_cannot_reach_service_lookup_or_upgrade() {
+            let (server, mut state) = fixture().await;
+            let material = openshell_bootstrap::jwt::generate_jwt_key().unwrap();
+            let issuer = crate::auth::sandbox_jwt::SandboxJwtIssuer::from_pem(
+                material.signing_key_pem.as_bytes(),
+                material.kid.clone(),
+                "test-gateway",
+                Duration::from_secs(3600),
+            )
+            .unwrap();
+            let authenticator = crate::auth::sandbox_jwt::SandboxJwtAuthenticator::from_pem(
+                material.public_key_pem.as_bytes(),
+                material.kid,
+                "test-gateway",
+            )
+            .unwrap();
+            let sandbox_token = issuer.mint("sandbox-1").unwrap().token;
+            Arc::get_mut(&mut state).unwrap().sandbox_jwt_authenticator =
+                Some(Arc::new(authenticator));
+            let expired = mint_rs256(
+                &claims_for(&server.uri(), TEST_AUDIENCE, now_secs() - 3600),
+                TEST_KID,
+            );
+            for loopback in [false, true] {
+                for websocket in [false, true] {
+                    for token in [
+                        None,
+                        Some("not-a-jwt"),
+                        Some(expired.as_str()),
+                        Some(sandbox_token.as_str()),
+                    ] {
+                        let response =
+                            request(state.clone(), token, "default", websocket, loopback).await;
+                        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+                        assert_eq!(response.headers()[header::WWW_AUTHENTICATE], "Bearer");
+                        let body = to_bytes(response.into_body(), 1024).await.unwrap();
+                        assert_eq!(
+                            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+                            serde_json::json!({"error": "unauthenticated"})
+                        );
+                    }
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn wrong_workspace_role_and_scope_are_denied_before_endpoint_lookup() {
+            let (server, state) = fixture().await;
+            add_member(&state).await;
+            let claims = claims_for(&server.uri(), TEST_AUDIENCE, now_secs() + 3600);
+            let token = mint_rs256(&claims, TEST_KID);
+            let mut wrong_role = claims.clone();
+            wrong_role["realm_access"]["roles"] = serde_json::json!(["unrelated-role"]);
+            let wrong_role = mint_rs256(&wrong_role, TEST_KID);
+            let mut wrong_scope = claims;
+            wrong_scope["scope"] = serde_json::json!("sandbox:read");
+            let wrong_scope = mint_rs256(&wrong_scope, TEST_KID);
+            for loopback in [false, true] {
+                for websocket in [false, true] {
+                    for (token, workspace) in [
+                        (token.as_str(), "another-workspace"),
+                        (wrong_role.as_str(), "default"),
+                        (wrong_scope.as_str(), "default"),
+                    ] {
+                        let response =
+                            request(state.clone(), Some(token), workspace, websocket, loopback)
+                                .await;
+                        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+                        let body = to_bytes(response.into_body(), 1024).await.unwrap();
+                        assert_eq!(
+                            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+                            serde_json::json!({"error": "permission_denied"})
+                        );
+                    }
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn workspace_member_and_platform_admin_reach_owned_sandbox_readiness_checks() {
+            let (server, state) = fixture().await;
+            add_member(&state).await;
+            add_endpoint(&state, "default").await;
+            let claims = claims_for(&server.uri(), TEST_AUDIENCE, now_secs() + 3600);
+            let member = mint_rs256(&claims, TEST_KID);
+            let mut admin = claims;
+            admin["sub"] = serde_json::json!("platform-admin-without-membership");
+            admin["realm_access"]["roles"] = serde_json::json!(["openshell-admin"]);
+            let admin = mint_rs256(&admin, TEST_KID);
+            for loopback in [false, true] {
+                for websocket in [false, true] {
+                    for token in [&member, &admin] {
+                        // The fixture is deliberately not Ready. A 412 proves
+                        // authorization passed and the owned sandbox was read.
+                        assert_eq!(
+                            request(state.clone(), Some(token), "default", websocket, loopback)
+                                .await
+                                .status(),
+                            StatusCode::PRECONDITION_FAILED
+                        );
+                    }
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn endpoint_cannot_forward_to_a_sandbox_owned_by_another_workspace() {
+            let (server, state) = fixture().await;
+            add_endpoint(&state, "another-workspace").await;
+            let mut claims = claims_for(&server.uri(), TEST_AUDIENCE, now_secs() + 3600);
+            claims["realm_access"]["roles"] = serde_json::json!(["openshell-admin"]);
+            let admin = mint_rs256(&claims, TEST_KID);
+            for websocket in [false, true] {
+                assert_eq!(
+                    request(state.clone(), Some(&admin), "default", websocket, false)
+                        .await
+                        .status(),
+                    StatusCode::NOT_FOUND
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn configured_oidc_without_a_verifier_never_falls_back_to_service_access() {
+            let (_server, mut state) = fixture().await;
+            Arc::get_mut(&mut state).unwrap().oidc_cache = None;
+            for loopback in [false, true] {
+                assert_eq!(
+                    request(state.clone(), None, "default", false, loopback)
+                        .await
+                        .status(),
+                    StatusCode::SERVICE_UNAVAILABLE
+                );
+            }
+        }
+    }
 }

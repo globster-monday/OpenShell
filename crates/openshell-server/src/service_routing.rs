@@ -4,6 +4,7 @@
 //! Browser-facing HTTP routing for sandbox service endpoints.
 
 use axum::{
+    Json,
     body::Body,
     response::{IntoResponse, Response as AxumResponse},
 };
@@ -24,6 +25,13 @@ use tokio::io::AsyncWriteExt;
 use tracing::{info, warn};
 
 use crate::ServerState;
+use crate::auth::{
+    authenticator::Authenticator,
+    authz::AuthzPolicy,
+    oidc::OidcAuthenticator,
+    principal::Principal,
+    workspace_authz::{MinWorkspaceRole, authorize_workspace},
+};
 use crate::persistence::{ObjectType, Store};
 
 const ENDPOINT_OBJECT_TYPE: &str = "service_endpoint";
@@ -31,6 +39,8 @@ const ROUTING_RULE_NAME: &str = "sandbox_service_routing";
 const ROUTING_RULE_TYPE: &str = "gateway";
 const RELAY_RULE_NAME: &str = "sandbox_service_relay";
 const RELAY_TARGET_HOST: &str = "127.0.0.1";
+// HTTP service relaying grants the same data-plane access as TCP forwarding.
+const SERVICE_ROUTE_AUTHZ_METHOD: &str = "/openshell.v1.OpenShell/ForwardTcp";
 
 impl ObjectType for ServiceEndpoint {
     fn object_type() -> &'static str {
@@ -139,10 +149,80 @@ pub async fn proxy_sandbox_service_request(
         return StatusCode::NOT_FOUND.into_response();
     };
 
+    if let Err(status) = authorize_service_request(&state, req.headers(), &workspace).await {
+        return service_auth_error_response(&state, &req, &sandbox_name, &service_name, status);
+    }
+
     match proxy_to_endpoint(state, req, &workspace, sandbox_name, service_name).await {
         Ok(response) => response.into_response(),
         Err(err) => err.into_response(),
     }
+}
+
+#[allow(clippy::result_large_err)]
+async fn authorize_service_request(
+    state: &ServerState,
+    headers: &HeaderMap,
+    workspace: &str,
+) -> Result<(), tonic::Status> {
+    let Some(oidc) = state.config.oidc.as_ref() else {
+        // Preserve local service previews when user OIDC is not configured.
+        return Ok(());
+    };
+    let cache = state
+        .oidc_cache
+        .clone()
+        .ok_or_else(|| tonic::Status::unavailable("OIDC authentication unavailable"))?;
+    let principal = OidcAuthenticator::new(cache)
+        .authenticate(headers, SERVICE_ROUTE_AUTHZ_METHOD)
+        .await?
+        .ok_or_else(|| tonic::Status::unauthenticated("user authentication required"))?;
+    let Principal::User(ref user) = principal else {
+        return Err(tonic::Status::permission_denied(
+            "user authentication required",
+        ));
+    };
+    AuthzPolicy {
+        admin_role: oidc.admin_role.clone(),
+        user_role: oidc.user_role.clone(),
+        scopes_enabled: !oidc.scopes_claim.is_empty(),
+    }
+    .check(&user.identity, SERVICE_ROUTE_AUTHZ_METHOD)?;
+    authorize_workspace(
+        &state.store,
+        &state.admin_role,
+        &principal,
+        workspace,
+        MinWorkspaceRole::User,
+    )
+    .await?;
+    Ok(())
+}
+
+fn service_auth_error_response(
+    state: &ServerState,
+    req: &Request<Body>,
+    sandbox_name: &str,
+    service_name: &str,
+    status: tonic::Status,
+) -> AxumResponse {
+    let (code, reason) = match status.code() {
+        tonic::Code::Unauthenticated => (StatusCode::UNAUTHORIZED, "unauthenticated"),
+        tonic::Code::PermissionDenied => (StatusCode::FORBIDDEN, "permission_denied"),
+        _ => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "authentication_unavailable",
+        ),
+    };
+    let error = ServiceRouteError::new(code, "Service access denied", reason);
+    emit_service_http_failure(state, req, sandbox_name, service_name, None, &error);
+    let mut response = (code, Json(serde_json::json!({"error": reason}))).into_response();
+    if code == StatusCode::UNAUTHORIZED {
+        response
+            .headers_mut()
+            .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+    }
+    response
 }
 
 #[derive(Debug, Clone)]
@@ -285,6 +365,28 @@ async fn proxy_to_endpoint(
             return Err(route_err);
         }
     };
+    // The route was authorized for its workspace before endpoint lookup. Bind
+    // that grant to the persisted sandbox rather than trusting an endpoint ID.
+    let owned_sandbox = sandbox.metadata.as_ref().is_some_and(|metadata| {
+        let sandbox_workspace = if metadata.workspace.is_empty() {
+            "default"
+        } else {
+            &metadata.workspace
+        };
+        sandbox_workspace == workspace && metadata.name == sandbox_name
+    });
+    if !owned_sandbox {
+        let err = ServiceRouteError::endpoint_unavailable();
+        emit_service_http_failure(
+            &state,
+            &req,
+            &sandbox_name,
+            &service_name,
+            Some(&endpoint),
+            &err,
+        );
+        return Err(err);
+    }
     if SandboxPhase::try_from(sandbox.phase()).ok() != Some(SandboxPhase::Ready) {
         let err = ServiceRouteError::sandbox_not_ready();
         emit_service_http_failure(
@@ -465,6 +567,8 @@ fn build_upstream_request(
         .headers_mut()
         .ok_or_else(ServiceRouteError::internal_error)?;
     for (name, value) in &parts.headers {
+        // Gateway credentials never reach the application, including upgrades
+        // and local previews where OIDC is not configured.
         if (is_hop_by_hop_header(name)
             && !(preserve_upgrade_headers && is_websocket_hop_by_hop_header(name)))
             || is_gateway_auth_header(name)
@@ -1200,6 +1304,63 @@ mod tests {
         assert_eq!(upstream.headers()[header::UPGRADE], "websocket");
         assert_eq!(upstream.headers()["sec-websocket-key"], "abc");
         assert_eq!(upstream.headers()[header::HOST], "127.0.0.1:8080");
+    }
+
+    #[tokio::test]
+    async fn http_and_websocket_upstreams_never_receive_gateway_bearers() {
+        for websocket in [false, true] {
+            let (client, server) = tokio::io::duplex(4096);
+            let (headers_tx, mut headers_rx) = tokio::sync::mpsc::unbounded_channel();
+            let server_task = tokio::spawn(async move {
+                hyper::server::conn::http1::Builder::new()
+                    .serve_connection(
+                        TokioIo::new(server),
+                        hyper::service::service_fn(move |req: Request<hyper::body::Incoming>| {
+                            headers_tx.send(req.headers().clone()).unwrap();
+                            async {
+                                Ok::<_, std::convert::Infallible>(Response::new(Body::empty()))
+                            }
+                        }),
+                    )
+                    .await
+            });
+            let (mut sender, connection) = hyper::client::conn::http1::Builder::new()
+                .handshake(TokioIo::new(client))
+                .await
+                .unwrap();
+            let client_task = tokio::spawn(connection);
+            let mut request = Request::builder()
+                .uri("/chat?session=main")
+                .header(header::AUTHORIZATION, "Bearer privileged-gateway-token")
+                .header("x-globster-caller-identity", "signed-caller-assertion");
+            if websocket {
+                request = request
+                    .header(header::CONNECTION, "Upgrade")
+                    .header(header::UPGRADE, "websocket")
+                    .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+                    .header("sec-websocket-version", "13");
+            }
+
+            // This is the common serializer used immediately before both
+            // relay types send to the sandbox, independently of OIDC config.
+            let upstream =
+                build_upstream_request(request.body(Body::empty()).unwrap(), 8080, websocket)
+                    .unwrap();
+            let response = sender.send_request(upstream).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let received = headers_rx.recv().await.unwrap();
+            assert!(!received.contains_key(header::AUTHORIZATION));
+            assert_eq!(
+                received["x-globster-caller-identity"],
+                "signed-caller-assertion"
+            );
+            if websocket {
+                assert_eq!(received[header::UPGRADE], "websocket");
+                assert_eq!(received["sec-websocket-key"], "dGhlIHNhbXBsZSBub25jZQ==");
+            }
+            server_task.abort();
+            client_task.abort();
+        }
     }
 
     #[tokio::test]
