@@ -1,9 +1,10 @@
 # Computer jail acceptance (33.03.03)
 
-Run this fixture as the supervisor's ordinary process entrypoint, with protocol v3
+Run this fixture as the supervisor's ordinary process entrypoint, with protocol v3/v4
 launcher enabled and the policy in this folder. It proves a command longer than
 five seconds, child processes, Python/Node/git, asyncio, the private filesystem
-boundary, read-only skills, internet socket denial, output caps, timeout kills, and cleanup when a turn disconnects.
+boundary, read-only legacy skills and platform projection, excluded private assets,
+unknown-version rejection, internet socket denial, output caps, timeout kills, and cleanup when a turn disconnects.
 The companion computer-spike fixture proves Office/browser feasibility separately.
 
 The container must start the supervisor as root with SYS_ADMIN and an outer

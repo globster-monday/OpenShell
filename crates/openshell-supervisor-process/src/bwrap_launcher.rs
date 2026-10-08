@@ -40,6 +40,7 @@ const ENABLE_ENV: &str = "OPENSHELL_EXPERIMENTAL_BWRAP_LAUNCHER";
 const PROTOCOL_VERSION: u64 = 1;
 const FILES_PROTOCOL_VERSION: u64 = 2;
 const SHELL_PROTOCOL_VERSION: u64 = 3;
+const PLATFORM_PROTOCOL_VERSION: u64 = 4;
 const SHELL_TIMEOUT_SECONDS: u64 = 900;
 const MAX_CONNECTIONS: usize = 4;
 pub const BWRAP_LAUNCHER_SUBCOMMAND: &str = "experimental-bwrap-launcher";
@@ -398,6 +399,7 @@ fn prepare_full_proc() -> Result<()> {
 }
 
 struct ShellRequest {
+    version: u64,
     command: String,
     root: PathBuf,
     socket: PathBuf,
@@ -421,12 +423,16 @@ fn parse_shell_request(request: &Value) -> Result<ShellRequest> {
     ];
     if fields.len() != keys.len()
         || !keys.iter().all(|key| fields.contains_key(*key))
-        || request["protocol_version"].as_u64() != Some(SHELL_PROTOCOL_VERSION)
+        || !matches!(
+            request["protocol_version"].as_u64(),
+            Some(SHELL_PROTOCOL_VERSION | PLATFORM_PROTOCOL_VERSION)
+        )
     {
         return Err(miette::miette!(
-            "protocol 3 requires only command, agent_root, turn_socket, cwd and timeout_seconds"
+            "protocol 3/4 requires only command, agent_root, turn_socket, cwd and timeout_seconds"
         ));
     }
+    let version = request["protocol_version"].as_u64().unwrap();
     let string = |key: &str| -> Result<&str> {
         request[key]
             .as_str()
@@ -451,13 +457,24 @@ fn parse_shell_request(request: &Value) -> Result<ShellRequest> {
     for folder in [
         "workspace",
         "agent",
-        "skills",
         "memory",
         "run",
         "run/turns",
         "run/scratch",
     ] {
         check_owned_directory(&root.join(folder))?;
+    }
+    let content = if version == PLATFORM_PROTOCOL_VERSION {
+        check_owned_directory(&root.join("platform"))?;
+        "platform/public"
+    } else {
+        "skills"
+    };
+    check_owned_directory(&root.join(content))?;
+    if fs::canonicalize(root.join(content)).into_diagnostic()? != root.join(content) {
+        return Err(miette::miette!(
+            "platform content must not traverse a symlink"
+        ));
     }
     let socket = PathBuf::from(string("turn_socket")?);
     if socket.parent() != Some(root.join("run/turns").as_path())
@@ -514,6 +531,7 @@ fn parse_shell_request(request: &Value) -> Result<ShellRequest> {
         .filter(|value| *value > 0)
         .ok_or_else(|| miette::miette!("timeout_seconds must be a positive integer"))?;
     Ok(ShellRequest {
+        version,
         command: string("command")?.to_owned(),
         root,
         socket,
@@ -598,10 +616,15 @@ fn run_shell(request: ShellRequest, stream: &UnixStream) -> Result<Value> {
     ] {
         command.args(["--ro-bind-try", path, path]);
     }
+    let (content, content_target) = if request.version == PLATFORM_PROTOCOL_VERSION {
+        ("platform/public", "/platform")
+    } else {
+        ("skills", "/skills")
+    };
     for (source, target, writable) in [
         (request.root.join("workspace"), "/files", true),
         (request.root.join("agent"), "/agent", true),
-        (request.root.join("skills"), "/skills", false),
+        (request.root.join(content), content_target, false),
         (request.root.join("memory"), "/memory", false),
         (request.scratch, "/tmp", true),
         (request.socket, "/run/tools.sock", true),
@@ -667,7 +690,7 @@ fn run_shell(request: ShellRequest, stream: &UnixStream) -> Result<Value> {
     let (stderr, stderr_truncated) = stderr
         .join()
         .map_err(|_| miette::miette!("stderr reader failed"))??;
-    Ok(json!({"protocol_version": SHELL_PROTOCOL_VERSION,
+    Ok(json!({"protocol_version": request.version,
         "status": if timed_out { "timed_out" } else if status.success() { "succeeded" } else { "failed" },
         "exit_code": status.code(), "stdout": stdout, "stderr": stderr,
         "stdout_truncated": stdout_truncated, "stderr_truncated": stderr_truncated,
@@ -691,7 +714,11 @@ fn run_shell_child(command: &str) -> Result<()> {
             read_only: [
                 "/usr",
                 "/etc",
-                "/skills",
+                if Path::new("/platform").exists() {
+                    "/platform"
+                } else {
+                    "/skills"
+                },
                 "/memory",
                 "/proc",
                 "/dev/urandom",
@@ -733,7 +760,10 @@ fn run_shell_child(command: &str) -> Result<()> {
 fn handle_request(stream: &UnixStream) -> Result<Value> {
     let request = read_request(stream)?;
     let request: Value = serde_json::from_slice(&request).into_diagnostic()?;
-    if request.get("protocol_version").and_then(Value::as_u64) == Some(SHELL_PROTOCOL_VERSION) {
+    if matches!(
+        request.get("protocol_version").and_then(Value::as_u64),
+        Some(SHELL_PROTOCOL_VERSION | PLATFORM_PROTOCOL_VERSION)
+    ) {
         return run_shell(parse_shell_request(&request)?, stream);
     }
     run_code(request)
@@ -1014,6 +1044,21 @@ mod tests {
         let parsed = parse_shell_request(&request).unwrap();
         assert_eq!(parsed.timeout, Duration::from_secs(900));
         assert_eq!(parsed.cwd, Path::new("/files"));
+        request["protocol_version"] = json!(4);
+        assert!(parse_shell_request(&request).is_err());
+        fs::create_dir(root.path().join("platform")).unwrap();
+        std::os::unix::fs::symlink(
+            root.path().join("skills"),
+            root.path().join("platform/public"),
+        )
+        .unwrap();
+        assert!(parse_shell_request(&request).is_err());
+        fs::remove_file(root.path().join("platform/public")).unwrap();
+        fs::create_dir(root.path().join("platform/public")).unwrap();
+        assert_eq!(parse_shell_request(&request).unwrap().version, 4);
+        request["protocol_version"] = json!(5);
+        assert!(parse_shell_request(&request).is_err());
+        request["protocol_version"] = json!(3);
         request["timeout_seconds"] = json!(0);
         assert!(parse_shell_request(&request).is_err());
         request["timeout_seconds"] = json!(30);

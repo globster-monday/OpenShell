@@ -68,6 +68,12 @@ blocks internet sockets and further user namespaces, sets 4096 open files and
 root setup with `SYS_ADMIN` to prepare the parent procfs before its normal
 privilege drop. Full-shell setup fails closed if a fresh child procfs is denied.
 
+Protocol 4 retains those limits and replaces the legacy `/skills` mount with
+read-only `/platform`, sourced only from the agent root's `platform/public/`.
+Keep private role prompts and indexes outside that projection. Protocol 3 clients
+retain their original layout. A runtime using the new layout requires a protocol-4
+launcher and must reject incompatible replies instead of falling back.
+
 This integration supports runc. Its namespaces and security filters share the
 host kernel; they do not provide a virtual-machine boundary. Keep the host
 kernel, container runtime, Bubblewrap, and supervisor patched, and retain the

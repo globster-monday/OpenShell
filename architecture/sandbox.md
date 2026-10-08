@@ -532,3 +532,15 @@ engine with a gateway policy revision.
   reports its normalized exit code before shutdown. The gateway persists the
   code on sandbox status, records `MainProcessExited`, and makes the sandbox
   terminal `Error`; runtime restart policies must not replace the process.
+
+Protocol 4 uses the same closed shell request and isolation boundaries as protocol 3,
+but binds only `agent_root/platform/public/` read-only at `/platform` instead of
+`skills/` at `/skills`. Both platform directories must be owned directories without
+symlink traversal. Runtime-only prompts and indexes belong outside `public/`; neither
+the enclosing platform root nor the database is mounted. Protocol 3 retains its old
+layout. Replies echo the requested version; unknown versions fail explicitly.
+
+The personal-assistant platform bundle requires a launcher implementing protocol 4
+in both Docker and hosted environments. An earlier launcher rejects that request;
+runtimes must not fall back to protocol 3. This protocol addition does not publish a
+fork release or update deployment pins.

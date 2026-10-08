@@ -13,6 +13,10 @@ for folder in (
     "workspace",
     "agent",
     "skills",
+    "platform",
+    "platform/public",
+    "platform/public/skills",
+    "platform/private",
     "memory",
     "runtime",
     "run",
@@ -23,6 +27,8 @@ for folder in (
     (root / folder).mkdir(mode=0o700)
 (root / "runtime/data.db").write_text("private database")
 (root / "skills/test.md").write_text("read-only skill")
+(root / "platform/public/skills/test.md").write_text("platform skill")
+(root / "platform/private/main.md").write_text("runtime-only prompt")
 turn_socket = root / "run/turns/turn.sock"
 listener = socket.socket(socket.AF_UNIX)
 listener.bind(str(turn_socket))
@@ -30,9 +36,9 @@ os.chmod(turn_socket, 0o600)
 listener.listen()
 
 
-def run(command, timeout=30):
+def run(command, timeout=30, version=3):
     request = {
-        "protocol_version": 3,
+        "protocol_version": version,
         "command": command,
         "agent_root": str(root),
         "turn_socket": str(turn_socket),
@@ -51,6 +57,18 @@ def run(command, timeout=30):
             response += chunk
         return json.loads(response)
 
+
+result = run("cat /platform/skills/test.md; test ! -e /platform/private && test ! -e /runtime && test ! -e /skills; echo boundary:$?; echo edit >> /platform/skills/test.md", version=4)
+assert result["protocol_version"] == 4 and "platform skill" in result["stdout"] and "boundary:0" in result["stdout"] and result["exit_code"] != 0, result
+assert run("true", version=5)["status"] == "launcher_error"
+# A client cannot redirect the fixed public source through a symlink.
+public = root / "platform/public"
+public.rename(root / "platform/saved")
+public.symlink_to(root / "runtime", target_is_directory=True)
+assert run("true", version=4)["status"] == "launcher_error"
+public.unlink()
+assert run("true", version=4)["status"] == "launcher_error"
+(root / "platform/saved").rename(public)
 
 result = run(
     'sleep 6; git --version; python --version; node --version; python -c "import asyncio; asyncio.run(asyncio.sleep(0))"; echo computer-ready'
