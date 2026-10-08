@@ -70,9 +70,25 @@ The connection flow:
 
 ### OIDC
 
-Gateways can validate OpenID Connect access tokens on gRPC requests. Configure OIDC when you want users, operators, or automation to authenticate with an identity provider such as Keycloak, Entra ID, or Okta.
+Gateways can validate OpenID Connect access tokens on gRPC requests, sandbox-service HTTP requests, and WebSocket service handshakes. Configure OIDC when you want users, operators, or automation to authenticate with an identity provider such as Keycloak, Entra ID, or Okta.
 
 OIDC is application-layer authentication. TLS still controls the transport. If TLS client certificates remain required, the CLI must also have an mTLS bundle for the gateway.
+
+With OIDC configured, each sandbox-service HTTP request and WebSocket handshake
+must include `Authorization: Bearer <token>`. The gateway applies the role and
+scope policy of `ForwardTcp` (`sandbox:write` when scopes are enabled), then
+checks membership in the target workspace. Platform administrators bypass the
+membership check. Missing, invalid, expired, or sandbox supervisor tokens receive
+HTTP 401; valid callers without the required role, scope, or workspace membership
+receive HTTP 403. Both responses use a JSON `error` field.
+
+A fronting gateway must attach a valid OpenShell user or automation token.
+Browser cookies and TLS client certificates do not satisfy this OIDC check.
+OpenShell always removes the `Authorization` header before forwarding to the
+sandbox application, including WebSocket handshakes and local previews without
+OIDC. Application-specific headers such as a fronting gateway's signed caller
+assertion are preserved. Local service previews otherwise retain their existing
+behavior.
 
 Configure the gateway with an issuer and audience:
 

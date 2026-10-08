@@ -618,6 +618,17 @@ DNS SANs configured on the gateway server certificate, with
 loopback gateways print `http://` URLs when loopback plaintext service HTTP is
 enabled; non-loopback TLS gateways continue to print `https://` URLs.
 
+When OIDC is configured, service HTTP requests and WebSocket handshakes require
+a validated user bearer token before endpoint lookup. They use the role and
+scope policy of `ForwardTcp`, plus workspace membership with platform-admin
+bypass. The resolved sandbox's stored workspace and name must match the
+authorized route before opening the supervisor relay. Sandbox supervisor tokens
+cannot authorize these user-facing routes. Gateway credentials are always
+removed before forwarding HTTP requests or WebSocket handshakes to the
+application, even without OIDC; signed application caller assertions are
+preserved. Local previews otherwise retain their existing behavior, and
+supervisor RPC authentication is unchanged.
+
 For `target.tcp`, the gateway only accepts loopback destinations such as
 `localhost`, `127.0.0.0/8`, or `::1`. The gateway never needs to know or dial a
 sandbox pod IP; supervisors connect outbound and bridge only the explicit target
