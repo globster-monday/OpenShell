@@ -211,6 +211,13 @@ data:
     supervisor_image_pull_policy = {{ .Values.supervisor.image.pullPolicy | quote }}
     {{- end }}
 
+    {{- if .Values.supervisor.processBootstraps }}
+    [openshell.drivers.kubernetes.process_bootstraps]
+    {{- range $image, $command := .Values.supervisor.processBootstraps }}
+    {{ $image | quote }} = {{ $command | toJson }}
+    {{- end }}
+    {{- end }}
+
     [openshell.drivers.kubernetes.managed_ssh_ingress]
     enabled                       = {{ .Values.networkPolicy.enabled }}
     gateway_namespace             = {{ .Release.Namespace | quote }}

@@ -740,6 +740,9 @@ impl KubernetesComputeDriver {
             .validate_sandbox_identity_config()
             .map_err(KubernetesDriverError::Precondition)?;
         config
+            .validate_process_bootstraps()
+            .map_err(KubernetesDriverError::InvalidArgument)?;
+        config
             .validate_proxy_uid()
             .map_err(KubernetesDriverError::Precondition)?;
         config
@@ -1682,6 +1685,7 @@ impl KubernetesComputeDriver {
             supervisor_image_pull_policy: &self.config.supervisor_image_pull_policy,
             supervisor_sideload_method: self.config.supervisor_sideload_method,
             topology: self.config.topology,
+            process_bootstraps: Some(&self.config.process_bootstraps),
             proxy_uid: self.config.sidecar.proxy_uid,
             process_binary_aware_network_policy: self
                 .config
@@ -3298,28 +3302,58 @@ fn apply_supervisor_sidecar_topology(
             ]),
         );
 
+        let bootstrap = container
+            .get("image")
+            .and_then(|image| image.as_str())
+            .and_then(|image| params.process_bootstraps.and_then(|items| items.get(image)));
+        if let Some(bootstrap) = bootstrap {
+            let mut command: Vec<serde_json::Value> =
+                bootstrap.iter().map(|s| serde_json::json!(s)).collect();
+            command.push(serde_json::json!("--"));
+            command.extend(
+                container["command"]
+                    .as_array()
+                    .expect("supervisor command")
+                    .iter()
+                    .cloned(),
+            );
+            container.insert("command".to_string(), serde_json::json!(command));
+        }
+        let has_bootstrap = bootstrap.is_some();
+
         let security_context = container
             .entry("securityContext")
             .or_insert_with(|| serde_json::json!({}));
         if let Some(sc) = security_context.as_object_mut() {
+            if has_bootstrap {
+                sc.insert(
+                    "seccompProfile".to_string(),
+                    serde_json::json!({"type": "RuntimeDefault"}),
+                );
+            }
             sc.insert(
                 "runAsUser".to_string(),
-                serde_json::json!(params.sandbox_uid),
+                serde_json::json!(if has_bootstrap { 0 } else { params.sandbox_uid }),
             );
             sc.insert(
                 "runAsGroup".to_string(),
                 serde_json::json!(params.sandbox_gid),
             );
-            sc.insert("runAsNonRoot".to_string(), serde_json::json!(true));
+            sc.insert(
+                "runAsNonRoot".to_string(),
+                serde_json::json!(!has_bootstrap),
+            );
             sc.insert(
                 "allowPrivilegeEscalation".to_string(),
                 serde_json::json!(false),
             );
             sc.insert(
                 "capabilities".to_string(),
-                serde_json::json!({
-                    "drop": ["ALL"]
-                }),
+                if has_bootstrap {
+                    serde_json::json!({"drop": ["ALL"], "add": ["CHOWN", "SETUID", "SETGID", "SETPCAP"]})
+                } else {
+                    serde_json::json!({"drop": ["ALL"]})
+                },
             );
         }
 
@@ -3552,6 +3586,7 @@ struct SandboxPodParams<'a> {
     supervisor_image_pull_policy: &'a str,
     supervisor_sideload_method: SupervisorSideloadMethod,
     topology: SupervisorTopology,
+    process_bootstraps: Option<&'a std::collections::HashMap<String, Vec<String>>>,
     proxy_uid: u32,
     process_binary_aware_network_policy: bool,
     https_proxy: Option<&'a str>,
@@ -3594,6 +3629,7 @@ impl Default for SandboxPodParams<'_> {
             supervisor_image_pull_policy: "",
             supervisor_sideload_method: SupervisorSideloadMethod::default(),
             topology: SupervisorTopology::default(),
+            process_bootstraps: None,
             proxy_uid: DEFAULT_PROXY_UID,
             process_binary_aware_network_policy: true,
             https_proxy: None,
@@ -6320,6 +6356,70 @@ mod tests {
             volume["image"].get("pullPolicy").is_none(),
             "pullPolicy should be omitted when empty"
         );
+    }
+
+    #[test]
+    fn process_bootstrap_requires_the_operator_allowlisted_image() {
+        let image = format!("registry/agent@sha256:{}", "a".repeat(64));
+        let bootstraps = std::collections::HashMap::from([(
+            image.clone(),
+            vec!["/usr/local/bin/bootstrap".to_string()],
+        )]);
+        for selected in [image.as_str(), "registry/agent:latest"] {
+            let params = SandboxPodParams {
+                topology: SupervisorTopology::Sidecar,
+                sandbox_uid: 1000,
+                sandbox_gid: 1000,
+                process_bootstraps: Some(&bootstraps),
+                ..SandboxPodParams::default()
+            };
+            let pod = sandbox_template_to_k8s(
+                &SandboxTemplate {
+                    image: selected.to_string(),
+                    ..SandboxTemplate::default()
+                },
+                false,
+                &std::collections::HashMap::new(),
+                false,
+                &params,
+            );
+            let agent = pod["spec"]["containers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|container| container["name"] == "agent")
+                .unwrap();
+            assert_eq!(agent["securityContext"]["allowPrivilegeEscalation"], false);
+            assert_eq!(
+                agent["securityContext"]["capabilities"]["drop"],
+                serde_json::json!(["ALL"])
+            );
+            if selected == image {
+                assert_eq!(agent["command"][0], "/usr/local/bin/bootstrap");
+                assert_eq!(
+                    agent["securityContext"]["seccompProfile"]["type"],
+                    "RuntimeDefault"
+                );
+                assert_eq!(agent["command"][1], "--");
+                assert_eq!(agent["securityContext"]["runAsUser"], 0);
+                assert_eq!(
+                    agent["securityContext"]["capabilities"]["add"],
+                    serde_json::json!(["CHOWN", "SETUID", "SETGID", "SETPCAP"])
+                );
+            } else {
+                assert_eq!(agent["securityContext"]["runAsUser"], 1000);
+                assert_eq!(agent["securityContext"]["runAsNonRoot"], true);
+                assert!(
+                    agent["securityContext"]["capabilities"]
+                        .get("add")
+                        .is_none()
+                );
+                assert_eq!(
+                    agent["command"][0],
+                    format!("{SUPERVISOR_MOUNT_PATH}/openshell-sandbox")
+                );
+            }
+        }
     }
 
     #[test]

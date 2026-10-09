@@ -556,6 +556,18 @@ provider_spiffe_workload_api_socket_path = "/spiffe-workload-api/spire-agent.soc
 # (hot-reloaded on change, e.g. via ConfigMap volume mount).
 # operator_namespace_file      = "/etc/openshell/workspace-namespaces.json"
 
+# Optional operator-owned bootstrap allowlist for sidecar process containers.
+# Helm value: supervisor.processBootstraps.
+# Keys must be exact immutable image references. Mutable tags never match.
+# Each command is an absolute executable plus at most 15 arguments; the driver
+# appends "--" and the normal process-supervisor command. Default: empty.
+# Only matching images start as UID 0 with CHOWN, SETUID, SETGID, SETPCAP.
+# The reviewed bootstrap MUST discard those capabilities and switch to the
+# configured sandbox UID/GID before launching the supervisor or any workload code.
+# RuntimeDefault seccomp and allowPrivilegeEscalation=false remain mandatory.
+# [openshell.drivers.kubernetes.process_bootstraps]
+# "registry.example/agent@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" = ["/usr/local/bin/bootstrap"]
+
 [openshell.drivers.kubernetes.managed_ssh_ingress]
 enabled = true
 gateway_namespace = "openshell"

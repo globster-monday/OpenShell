@@ -49,6 +49,9 @@ supervisor:
   # "sidecar" runs network enforcement in a dedicated sidecar and the process
   # supervisor as a low-capability wrapper in the agent container.
   topology: "combined"
+  # -- Operator-owned absolute bootstrap commands keyed by exact immutable workload image.
+  # Only matching sidecar process containers receive temporary identity-setup capabilities.
+  processBootstraps: {}
   sidecar:
     # -- UID for relaxed long-running network sidecars in sidecar topology.
     # Strict process/binary-aware sidecars run as UID 0 so Kubernetes grants

@@ -660,3 +660,23 @@ tests:
     asserts:
       - failedTemplate:
           errorMessage: "certManager.serverIssuerRef.name is set but certManager.enabled is false \u2014 the external server certificate, its Secret mount, and the gateway TLS configuration all require cert-manager to be enabled. Set certManager.enabled=true or remove certManager.serverIssuerRef.name."
+
+  - it: renders only operator configured bootstrap commands with quoted digest keys
+    template: templates/gateway-config.yaml
+    set:
+      supervisor.processBootstraps:
+        "registry.example/agent@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": ["/usr/local/bin/bootstrap"]
+    asserts:
+      - matchRegex:
+          path: data["gateway.toml"]
+          pattern: '\[openshell\.drivers\.kubernetes\.process_bootstraps\]'
+      - matchRegex:
+          path: data["gateway.toml"]
+          pattern: '"registry.example/agent@sha256:a{64}" = \["/usr/local/bin/bootstrap"\]'
+
+  - it: leaves bootstrap privileges disabled by default
+    template: templates/gateway-config.yaml
+    asserts:
+      - notMatchRegex:
+          path: data["gateway.toml"]
+          pattern: 'process_bootstraps'
