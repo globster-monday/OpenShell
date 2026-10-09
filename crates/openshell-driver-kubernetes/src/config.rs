@@ -326,6 +326,9 @@ pub struct KubernetesComputeConfig {
     pub topology: SupervisorTopology,
     /// Sidecar-only settings used when `topology = "sidecar"`.
     pub sidecar: KubernetesSidecarConfig,
+    /// Operator-owned bootstrap commands keyed by exact immutable workload image.
+    /// Only sidecar workloads matching this allowlist start with identity setup capabilities.
+    pub process_bootstraps: std::collections::HashMap<String, Vec<String>>,
     /// Corporate HTTP forward proxy used by the network supervisor for
     /// policy-approved TLS CONNECT egress.
     pub https_proxy: Option<String>,
@@ -454,6 +457,7 @@ impl Default for KubernetesComputeConfig {
             supervisor_sideload_method: SupervisorSideloadMethod::default(),
             topology: SupervisorTopology::default(),
             sidecar: KubernetesSidecarConfig::default(),
+            process_bootstraps: std::collections::HashMap::new(),
             https_proxy: None,
             no_proxy: None,
             proxy_auth_secret_name: None,
@@ -504,6 +508,27 @@ impl KubernetesComputeConfig {
         validate_provider_spiffe_workload_api_socket_path_value(
             &self.provider_spiffe_workload_api_socket_path,
         )
+    }
+
+    pub fn validate_process_bootstraps(&self) -> Result<(), String> {
+        for (image, command) in &self.process_bootstraps {
+            let digest = image.rsplit_once("@sha256:").map(|(_, value)| value);
+            if !digest.is_some_and(|value| {
+                value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
+            }) || command.is_empty()
+                || !command[0].starts_with('/')
+                || command.len() > 16
+                || command
+                    .iter()
+                    .any(|arg| arg.contains('\0') || arg.len() > 4096)
+            {
+                return Err(
+                    "process_bootstraps requires exact SHA256 images and bounded absolute commands"
+                        .into(),
+                );
+            }
+        }
+        Ok(())
     }
 
     pub fn validate_proxy_uid(&self) -> Result<(), String> {
@@ -1936,5 +1961,29 @@ mod tests {
         assert!(al.insert("ns2".to_string()));
         assert!(al.read().contains("ns2"));
         assert!(al.remove("ns1"));
+    }
+    #[test]
+    fn process_bootstrap_configuration_requires_immutable_images_and_absolute_commands() {
+        let digest = format!("registry/agent@sha256:{}", "a".repeat(64));
+        for (image, command, valid) in [
+            (
+                digest.as_str(),
+                vec!["/usr/local/bin/bootstrap".to_string()],
+                true,
+            ),
+            (
+                "registry/agent:latest",
+                vec!["/usr/local/bin/bootstrap".to_string()],
+                false,
+            ),
+            (digest.as_str(), vec!["bootstrap".to_string()], false),
+            (digest.as_str(), vec![], false),
+        ] {
+            let config = KubernetesComputeConfig {
+                process_bootstraps: std::collections::HashMap::from([(image.to_string(), command)]),
+                ..KubernetesComputeConfig::default()
+            };
+            assert_eq!(config.validate_process_bootstraps().is_ok(), valid);
+        }
     }
 }
