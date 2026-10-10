@@ -1685,6 +1685,7 @@ impl KubernetesComputeDriver {
             supervisor_image_pull_policy: &self.config.supervisor_image_pull_policy,
             supervisor_sideload_method: self.config.supervisor_sideload_method,
             topology: self.config.topology,
+            process_bootstrap: &self.config.process_bootstrap,
             process_bootstraps: Some(&self.config.process_bootstraps),
             proxy_uid: self.config.sidecar.proxy_uid,
             process_binary_aware_network_policy: self
@@ -3302,10 +3303,15 @@ fn apply_supervisor_sidecar_topology(
             ]),
         );
 
-        let bootstrap = container
-            .get("image")
-            .and_then(|image| image.as_str())
-            .and_then(|image| params.process_bootstraps.and_then(|items| items.get(image)));
+        let bootstrap = if params.process_bootstrap.is_empty() {
+            container
+                .get("image")
+                .and_then(|image| image.as_str())
+                .and_then(|image| params.process_bootstraps.and_then(|items| items.get(image)))
+                .map(Vec::as_slice)
+        } else {
+            Some(params.process_bootstrap)
+        };
         if let Some(bootstrap) = bootstrap {
             let mut command: Vec<serde_json::Value> =
                 bootstrap.iter().map(|s| serde_json::json!(s)).collect();
@@ -3586,6 +3592,7 @@ struct SandboxPodParams<'a> {
     supervisor_image_pull_policy: &'a str,
     supervisor_sideload_method: SupervisorSideloadMethod,
     topology: SupervisorTopology,
+    process_bootstrap: &'a [String],
     process_bootstraps: Option<&'a std::collections::HashMap<String, Vec<String>>>,
     proxy_uid: u32,
     process_binary_aware_network_policy: bool,
@@ -3629,6 +3636,7 @@ impl Default for SandboxPodParams<'_> {
             supervisor_image_pull_policy: "",
             supervisor_sideload_method: SupervisorSideloadMethod::default(),
             topology: SupervisorTopology::default(),
+            process_bootstrap: &[],
             process_bootstraps: None,
             proxy_uid: DEFAULT_PROXY_UID,
             process_binary_aware_network_policy: true,
@@ -6356,6 +6364,55 @@ mod tests {
             volume["image"].get("pullPolicy").is_none(),
             "pullPolicy should be omitted when empty"
         );
+    }
+
+    #[test]
+    fn operator_process_bootstrap_is_independent_of_the_workload_image() {
+        let command = vec!["/usr/local/bin/bootstrap".to_string()];
+        let params = SandboxPodParams {
+            topology: SupervisorTopology::Sidecar,
+            process_bootstrap: &command,
+            sandbox_uid: 1000,
+            sandbox_gid: 1000,
+            ..SandboxPodParams::default()
+        };
+        for image in [
+            "registry/assistant:release-a",
+            "registry/assistant:release-b",
+        ] {
+            let pod = sandbox_template_to_k8s(
+                &SandboxTemplate {
+                    image: image.to_string(),
+                    ..SandboxTemplate::default()
+                },
+                false,
+                &std::collections::HashMap::new(),
+                false,
+                &params,
+            );
+            let agent = pod["spec"]["containers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|container| container["name"] == "agent")
+                .unwrap();
+            assert_eq!(agent["command"][0], "/usr/local/bin/bootstrap");
+            assert_eq!(agent["command"][1], "--");
+            assert_eq!(agent["securityContext"]["runAsUser"], 0);
+            assert_eq!(
+                agent["securityContext"]["seccompProfile"]["type"],
+                "RuntimeDefault"
+            );
+            assert_eq!(agent["securityContext"]["allowPrivilegeEscalation"], false);
+            assert_eq!(
+                agent["securityContext"]["capabilities"]["drop"],
+                serde_json::json!(["ALL"])
+            );
+            assert_eq!(
+                agent["securityContext"]["capabilities"]["add"],
+                serde_json::json!(["CHOWN", "SETUID", "SETGID", "SETPCAP"])
+            );
+        }
     }
 
     #[test]

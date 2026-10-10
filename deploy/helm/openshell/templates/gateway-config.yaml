@@ -211,6 +211,16 @@ data:
     supervisor_image_pull_policy = {{ .Values.supervisor.image.pullPolicy | quote }}
     {{- end }}
 
+    {{- if .Values.supervisor.processBootstrap }}
+    {{- if ne .Values.supervisor.topology "sidecar" }}
+    {{- fail "supervisor.processBootstrap requires sidecar topology" }}
+    {{- end }}
+    {{- if .Values.supervisor.processBootstraps }}
+    {{- fail "supervisor.processBootstrap cannot be combined with processBootstraps" }}
+    {{- end }}
+    process_bootstrap = {{ .Values.supervisor.processBootstrap | toJson }}
+    {{- end }}
+
     {{- if .Values.supervisor.processBootstraps }}
     [openshell.drivers.kubernetes.process_bootstraps]
     {{- range $image, $command := .Values.supervisor.processBootstraps }}

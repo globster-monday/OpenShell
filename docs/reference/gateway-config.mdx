@@ -556,6 +556,15 @@ provider_spiffe_workload_api_socket_path = "/spiffe-workload-api/spire-agent.soc
 # (hot-reloaded on change, e.g. via ConfigMap volume mount).
 # operator_namespace_file      = "/etc/openshell/workspace-namespaces.json"
 
+# Optional operator-owned bootstrap for every sidecar process container.
+# Helm value: supervisor.processBootstrap. Default: disabled.
+# Configure only where admission accepts trusted, reviewed workload images.
+# Requires topology="sidecar" and cannot be combined with process_bootstraps.
+# The absolute command has at most 15 arguments. The driver appends "--" and
+# the process supervisor command. It starts with UID 0 and the identity-setup
+# capabilities below, which MUST be discarded before workload execution.
+# process_bootstrap = ["/usr/local/bin/bootstrap"]
+
 # Optional operator-owned bootstrap allowlist for sidecar process containers.
 # Helm value: supervisor.processBootstraps.
 # Keys must be exact immutable image references. Mutable tags never match.
