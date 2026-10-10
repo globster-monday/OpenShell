@@ -679,4 +679,36 @@ tests:
     asserts:
       - notMatchRegex:
           path: data["gateway.toml"]
+          pattern: 'process_bootstrap'
+
+  - it: renders an operator process bootstrap without an image map
+    template: templates/gateway-config.yaml
+    set:
+      supervisor.topology: sidecar
+      supervisor.processBootstrap: ["/usr/local/bin/bootstrap"]
+    asserts:
+      - matchRegex:
+          path: data["gateway.toml"]
+          pattern: 'process_bootstrap = \["/usr/local/bin/bootstrap"\]'
+      - notMatchRegex:
+          path: data["gateway.toml"]
           pattern: 'process_bootstraps'
+
+  - it: rejects operator process bootstrap in combined topology
+    template: templates/statefulset.yaml
+    set:
+      supervisor.processBootstrap: ["/usr/local/bin/bootstrap"]
+    asserts:
+      - failedTemplate:
+          errorMessage: "supervisor.processBootstrap requires sidecar topology"
+
+  - it: rejects simultaneous operator bootstrap and image map
+    template: templates/statefulset.yaml
+    set:
+      supervisor.topology: sidecar
+      supervisor.processBootstrap: ["/usr/local/bin/bootstrap"]
+      supervisor.processBootstraps:
+        "registry.example/agent@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": ["/usr/local/bin/bootstrap"]
+    asserts:
+      - failedTemplate:
+          errorMessage: "supervisor.processBootstrap cannot be combined with processBootstraps"

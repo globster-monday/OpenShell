@@ -491,14 +491,14 @@ proxy UID must remain at least `1000` and must not match the workload UID
 because the pod egress fence exempts its traffic. The pod `fsGroup` is set to
 `sandbox_gid` in both modes.
 
-If the agent command starts with a bootstrap before `openshell-sandbox`, compare
-its exact image digest with `[openshell.drivers.kubernetes.process_bootstraps]`
-(Helm `supervisor.processBootstraps`).
-Only operator-allowlisted images receive UID 0 and CHOWN/SETUID/SETGID/SETPCAP at
-startup. Verify that the bootstrap drops these before supervisor startup, while
-RuntimeDefault seccomp and `allowPrivilegeEscalation: false` remain enabled.
-Never add a mutable tag or caller-selected bootstrap to recover a failing sandbox.
-Images outside the allowlist retain the existing non-root startup.
+If the agent command starts with a bootstrap before `openshell-sandbox`, inspect
+operator configuration. `process_bootstrap` (Helm `supervisor.processBootstrap`)
+applies to every sidecar process container independently of its image and requires
+trusted image admission. It cannot be combined with the legacy `process_bootstraps`
+image map or combined topology. The disabled default retains non-root startup.
+Verify that bootstrap drops UID 0 and CHOWN/SETUID/SETGID/SETPCAP before supervisor
+startup, with RuntimeDefault seccomp and `allowPrivilegeEscalation: false` enabled.
+Never accept a caller-selected bootstrap to recover a failing sandbox.
 
 In sidecar topology only the network sidecar should mount the gateway bootstrap
 credentials (`openshell-sa-token` and `openshell-client-tls`). The process

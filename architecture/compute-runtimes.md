@@ -490,15 +490,17 @@ update the matching driver README if a maintainer-facing constraint changes.
 
 ### Operator-owned process bootstrap
 
-The Kubernetes sidecar topology can prefix the process supervisor with a bootstrap
-selected from `process_bootstraps` by the workload's exact immutable image reference.
-The allowlist belongs to gateway configuration, never the sandbox request or image
-environment. Empty configuration preserves non-root startup for every image.
+The Kubernetes sidecar topology can prefix the process supervisor with an
+operator-owned `process_bootstrap` command. It applies to every process container
+without reading the workload image. This mode requires trusted image admission,
+rejects combined topology and cannot be combined with the legacy `process_bootstraps`
+image map. Empty configuration preserves non-root startup. Workload requests and
+image environment cannot supply or override either operator setting.
 
-A matching image starts with UID 0 and only CHOWN, SETUID, SETGID and SETPCAP, with
-RuntimeDefault seccomp and privilege escalation disabled. The operator must review
-the image and bootstrap as trusted startup code: it must sanitize the environment,
-provision identities, drop all capabilities and switch to the configured sandbox
-identity before starting the process supervisor. The driver does not add a container,
-change network-sidecar authority, or expose gateway credentials to the process
-container. This grant must be reviewed again for each new image digest.
+Bootstrap starts with UID 0 and only CHOWN, SETUID, SETGID and SETPCAP, with
+RuntimeDefault seccomp and privilege escalation disabled. The trusted bootstrap
+must sanitize the environment, provision identities, drop all capabilities and
+switch to the configured sandbox identity before starting the process supervisor.
+The driver does not add a container, change network-sidecar authority or expose
+gateway credentials to the process container. Review admitted images through the
+owning platform's release-verification boundary.

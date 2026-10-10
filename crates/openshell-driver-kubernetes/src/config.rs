@@ -326,6 +326,9 @@ pub struct KubernetesComputeConfig {
     pub topology: SupervisorTopology,
     /// Sidecar-only settings used when `topology = "sidecar"`.
     pub sidecar: KubernetesSidecarConfig,
+    /// Operator-owned bootstrap command for every sidecar process container.
+    /// Disabled by default; workload input cannot select or override it.
+    pub process_bootstrap: Vec<String>,
     /// Operator-owned bootstrap commands keyed by exact immutable workload image.
     /// Only sidecar workloads matching this allowlist start with identity setup capabilities.
     pub process_bootstraps: std::collections::HashMap<String, Vec<String>>,
@@ -435,6 +438,19 @@ pub const ANNOTATION_SCC_UID_RANGE: &str = "openshift.io/sa.scc.uid-range";
 /// Format: `<start>/<size>` (e.g. `1000000000/10000`).
 pub const ANNOTATION_SCC_SUPPLEMENTAL_GROUPS: &str = "openshift.io/sa.scc.supplemental-groups";
 
+fn validate_process_bootstrap_command(command: &[String]) -> Result<(), String> {
+    if command.is_empty()
+        || !command[0].starts_with('/')
+        || command.len() > 16
+        || command
+            .iter()
+            .any(|arg| arg.contains('\0') || arg.len() > 4096)
+    {
+        return Err("process bootstrap requires a bounded absolute command".into());
+    }
+    Ok(())
+}
+
 impl Default for KubernetesComputeConfig {
     fn default() -> Self {
         Self {
@@ -457,6 +473,7 @@ impl Default for KubernetesComputeConfig {
             supervisor_sideload_method: SupervisorSideloadMethod::default(),
             topology: SupervisorTopology::default(),
             sidecar: KubernetesSidecarConfig::default(),
+            process_bootstrap: Vec::new(),
             process_bootstraps: std::collections::HashMap::new(),
             https_proxy: None,
             no_proxy: None,
@@ -511,16 +528,17 @@ impl KubernetesComputeConfig {
     }
 
     pub fn validate_process_bootstraps(&self) -> Result<(), String> {
+        if !self.process_bootstrap.is_empty() {
+            if self.topology != SupervisorTopology::Sidecar || !self.process_bootstraps.is_empty() {
+                return Err("process_bootstrap requires sidecar topology and cannot be combined with process_bootstraps".into());
+            }
+            validate_process_bootstrap_command(&self.process_bootstrap)?;
+        }
         for (image, command) in &self.process_bootstraps {
             let digest = image.rsplit_once("@sha256:").map(|(_, value)| value);
             if !digest.is_some_and(|value| {
                 value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
-            }) || command.is_empty()
-                || !command[0].starts_with('/')
-                || command.len() > 16
-                || command
-                    .iter()
-                    .any(|arg| arg.contains('\0') || arg.len() > 4096)
+            }) || validate_process_bootstrap_command(command).is_err()
             {
                 return Err(
                     "process_bootstraps requires exact SHA256 images and bounded absolute commands"
@@ -1962,6 +1980,35 @@ mod tests {
         assert!(al.read().contains("ns2"));
         assert!(al.remove("ns1"));
     }
+    #[test]
+    fn operator_process_bootstrap_requires_an_unambiguous_sidecar_command() {
+        let command = vec!["/usr/local/bin/bootstrap".to_string()];
+        let mut config = KubernetesComputeConfig {
+            topology: SupervisorTopology::Sidecar,
+            process_bootstrap: command.clone(),
+            ..KubernetesComputeConfig::default()
+        };
+        assert!(config.validate_process_bootstraps().is_ok());
+        config.topology = SupervisorTopology::Combined;
+        assert!(config.validate_process_bootstraps().is_err());
+        config.topology = SupervisorTopology::Sidecar;
+        config
+            .process_bootstraps
+            .insert(format!("registry/agent@sha256:{}", "a".repeat(64)), command);
+        assert!(config.validate_process_bootstraps().is_err());
+        config.process_bootstraps.clear();
+        for invalid in [
+            vec!["relative".to_string()],
+            vec!["/bin/bootstrap\0".to_string()],
+            vec!["/bin/bootstrap".to_string(); 17],
+        ] {
+            config.process_bootstrap = invalid;
+            assert!(config.validate_process_bootstraps().is_err());
+        }
+        config.process_bootstrap.clear();
+        assert!(config.validate_process_bootstraps().is_ok());
+    }
+
     #[test]
     fn process_bootstrap_configuration_requires_immutable_images_and_absolute_commands() {
         let digest = format!("registry/agent@sha256:{}", "a".repeat(64));
