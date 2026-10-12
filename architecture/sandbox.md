@@ -35,6 +35,25 @@ only when the set is already empty; any other outcome fails the spawn.
 6. It opens a supervisor session back to the gateway for connect, exec, file
    sync, config polling, and log push.
 
+### Trusted binding startup gate (experimental)
+
+On Linux, the internal `await-binding` command can hold supervisor startup
+behind a read-only projected, private root-owned binding grant. The grant
+must match the prepared slot, generation, pod UID and sandbox ID and carry
+a nonempty allocation ID. No supervisor, tenant credential acquisition or
+workload child starts while the grant is absent. Invalid grants fail closed;
+waiting is bounded. The accepted grant supplies the exact main-process argv
+and serialized workload environment before the gate replaces itself with
+the normal supervisor. Workload environment is applied to the child, not
+the privileged supervisor's environment.
+
+The gate is not an allocator or authorization API. Its resource owner must
+first commit single-use ownership with resource-side fencing, initialize
+the exclusive workspace with one writer, and publish the grant only after
+policy, credentials and ordinary sandbox ownership are established.
+Preparation, binding and retirement APIs are not implemented by this gate;
+it does not enable a warm pool or prove retained-resource customer readiness.
+
 ## Isolation Layers
 
 OpenShell uses overlapping controls rather than a single sandbox primitive:
