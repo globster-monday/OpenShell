@@ -520,6 +520,10 @@ fn main() -> Result<()> {
     // sandbox flags. Kubernetes init containers invoke this path to seed an
     // emptyDir volume that the agent container then executes from.
     let raw_args: Vec<String> = std::env::args().collect();
+    #[cfg(target_os = "linux")]
+    if raw_args.get(1).map(String::as_str) == Some(openshell_sandbox::binding_gate::SUBCOMMAND) {
+        return openshell_sandbox::binding_gate::run(&raw_args[2..]);
+    }
     if raw_args.get(1).map(String::as_str) == Some(COPY_SELF_SUBCOMMAND) {
         let dest = raw_args.get(2).ok_or_else(|| {
             miette::miette!("usage: openshell-sandbox {COPY_SELF_SUBCOMMAND} <DEST>")

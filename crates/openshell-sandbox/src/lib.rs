@@ -6,6 +6,8 @@
 //! This crate provides process sandboxing and monitoring capabilities.
 
 mod activity_aggregator;
+#[cfg(target_os = "linux")]
+pub mod binding_gate;
 mod denial_aggregator;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod google_cloud_metadata;
