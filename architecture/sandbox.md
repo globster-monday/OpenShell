@@ -532,3 +532,11 @@ engine with a gateway policy revision.
   reports its normalized exit code before shutdown. The gateway persists the
   code on sandbox status, records `MainProcessExited`, and makes the sandbox
   terminal `Error`; runtime restart policies must not replace the process.
+
+### Kubernetes volume ownership
+
+The Kubernetes driver applies the sandbox group with `OnRootMismatch`. Initial
+volume preparation remains enabled; repeated CSI republish does not recursively
+replace application-managed groups after the volume root is prepared. This keeps
+long-running workloads with distinct internal users usable without granting those
+users one another's groups.

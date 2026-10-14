@@ -3246,6 +3246,11 @@ fn apply_supervisor_sidecar_topology(
         .or_insert_with(|| serde_json::json!({}));
     if let Some(sc) = pod_security_context.as_object_mut() {
         sc.insert("fsGroup".to_string(), serde_json::json!(params.sandbox_gid));
+        // CSI republish must not rewrite ownership chosen by a running workload.
+        sc.insert(
+            "fsGroupChangePolicy".to_string(),
+            serde_json::json!("OnRootMismatch"),
+        );
     }
 
     spec.insert("shareProcessNamespace".to_string(), serde_json::json!(true));
@@ -3462,6 +3467,10 @@ fn apply_workspace_persistence(
         .or_insert_with(|| serde_json::json!({}));
     if let Some(pod_sc_obj) = pod_sc.as_object_mut() {
         pod_sc_obj.insert("fsGroup".to_string(), serde_json::json!(sandbox_gid));
+        pod_sc_obj.insert(
+            "fsGroupChangePolicy".to_string(),
+            serde_json::json!("OnRootMismatch"),
+        );
     }
 
     // 1. Add workspace volume mount to the agent container
@@ -6520,6 +6529,10 @@ mod tests {
 
         assert_eq!(pod_template["spec"]["shareProcessNamespace"], true);
         assert_eq!(pod_template["spec"]["securityContext"]["fsGroup"], 1500);
+        assert_eq!(
+            pod_template["spec"]["securityContext"]["fsGroupChangePolicy"],
+            "OnRootMismatch"
+        );
         let containers = pod_template["spec"]["containers"].as_array().unwrap();
         assert_eq!(containers.len(), 2);
 
@@ -7447,6 +7460,11 @@ mod tests {
         });
 
         apply_workspace_persistence(&mut pod_template, "img:latest", "Always", 1000);
+        assert_eq!(pod_template["spec"]["securityContext"]["fsGroup"], 1000);
+        assert_eq!(
+            pod_template["spec"]["securityContext"]["fsGroupChangePolicy"],
+            "OnRootMismatch"
+        );
 
         let cmd = pod_template["spec"]["initContainers"][0]["command"]
             .as_array()
