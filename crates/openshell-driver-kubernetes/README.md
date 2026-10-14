@@ -253,3 +253,13 @@ openshell sandbox create \
   }' \
   -- claude
 ```
+
+## Persistent volume ownership
+
+Sandbox pods pair `fsGroup` with `fsGroupChangePolicy: OnRootMismatch`.
+Kubelet prepares a volume whose root lacks the sandbox group or required mode,
+then leaves an initialized volume unchanged on subsequent mounts and CSI
+republish. Workloads may therefore use distinct identities within their workspace
+without periodic recursive group changes revoking access during execution.
+Applications remain responsible for their internal file permissions; changing the
+volume root's group or required mode can cause kubelet to prepare it again.
