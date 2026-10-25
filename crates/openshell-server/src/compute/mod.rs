@@ -559,6 +559,8 @@ impl ComputeDriver for RemoteComputeDriver {
 
 #[derive(Clone)]
 pub struct ComputeRuntime {
+    #[cfg(all(not(target_os = "windows"), feature = "in-tree-compute-drivers"))]
+    pub(crate) prewarm_driver: Option<KubernetesComputeDriver>,
     driver: TracedDriver,
     driver_info: ComputeDriverInfoSnapshot,
     driver_process: Option<Arc<ManagedDriverProcess>>,
@@ -685,6 +687,8 @@ impl ComputeRuntime {
             Err(status) => return Err(compute_error_from_status(status)),
         };
         Ok(Self {
+            #[cfg(all(not(target_os = "windows"), feature = "in-tree-compute-drivers"))]
+            prewarm_driver: None,
             driver: TracedDriver::new(driver, driver_name),
             driver_info,
             driver_process,
@@ -769,8 +773,9 @@ impl ComputeRuntime {
             .await
             .map_err(|err| ComputeError::Message(err.to_string()))?;
         let operator_allowlist_arc = driver.operator_allowlist().cloned();
+        let prewarm_driver = driver.clone();
         let driver: SharedComputeDriver = Arc::new(KubernetesDriverService::new_in_process(driver));
-        let runtime = Self::from_driver(
+        let mut runtime = Self::from_driver(
             ComputeDriverKind::Kubernetes.as_str().to_string(),
             driver,
             None,
@@ -781,6 +786,7 @@ impl ComputeRuntime {
             supervisor_sessions,
         )
         .await?;
+        runtime.prewarm_driver = Some(prewarm_driver);
         Ok((runtime, operator_allowlist_arc))
     }
 
@@ -937,6 +943,56 @@ impl ComputeRuntime {
             .map(|_| ())
     }
 
+    /// Publish the validated ordinary sandbox record for resource-side adoption,
+    /// without dispatching a CREATE or choosing a new workload identity.
+    fn require_binding_released(sandbox: &Sandbox) -> Result<(), Status> {
+        if sandbox.metadata.as_ref().is_some_and(|metadata| {
+            metadata
+                .annotations
+                .get(openshell_core::driver_utils::ANNOTATION_BINDING_PENDING)
+                .map(String::as_str)
+                == Some("true")
+        }) {
+            return Err(Status::failed_precondition(
+                "native retained sandbox binding has not released its initial launch",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn persist_retained_sandbox(
+        &self,
+        mut sandbox: Sandbox,
+    ) -> Result<Sandbox, Status> {
+        let labels = serde_json::to_string(&sandbox.object_labels())
+            .map_err(|_| Status::internal("retained sandbox labels could not be encoded"))?;
+        let result = self
+            .store
+            .put_if(
+                Sandbox::object_type(),
+                sandbox.object_id(),
+                sandbox.object_name(),
+                sandbox.object_workspace(),
+                &sandbox.encode_to_vec(),
+                Some(&labels),
+                WriteCondition::MustCreate,
+            )
+            .await
+            .map_err(|e| {
+                if e.is_expected() {
+                    Status::already_exists("retained sandbox already exists")
+                } else {
+                    Status::internal("retained sandbox could not be persisted")
+                }
+            })?;
+        if let Some(metadata) = sandbox.metadata.as_mut() {
+            metadata.resource_version = result.resource_version;
+        }
+        self.sandbox_index.update_from_sandbox(&sandbox);
+        self.sandbox_watch_bus.notify(sandbox.object_id());
+        Ok(sandbox)
+    }
+
     pub async fn create_sandbox(
         &self,
         sandbox: Sandbox,
@@ -1072,6 +1128,7 @@ impl ComputeRuntime {
             .await
             .map_err(|e| Status::internal(format!("fetch sandbox failed: {e}")))?
             .ok_or_else(|| Status::not_found("sandbox not found"))?;
+        Self::require_binding_released(&current)?;
         if current.object_name() != sandbox_name {
             return Err(Status::aborted(
                 "sandbox name changed while the stop request was waiting; retry explicitly",
@@ -1227,6 +1284,7 @@ impl ComputeRuntime {
             .await
             .map_err(|e| Status::internal(format!("fetch sandbox failed: {e}")))?
             .ok_or_else(|| Status::not_found("sandbox not found"))?;
+        Self::require_binding_released(&current)?;
         if current.object_name() != sandbox_name {
             return Err(Status::aborted(
                 "sandbox name changed while the start request was waiting; retry explicitly",
@@ -1557,6 +1615,7 @@ impl ComputeRuntime {
                 deleted: true,
             });
         };
+        Self::require_binding_released(&current)?;
         if current.object_name() != target.sandbox_name {
             return Err(Status::aborted(
                 "sandbox name changed while the delete request was waiting; retry explicitly",
@@ -3244,6 +3303,14 @@ impl ComputeRuntime {
             }
 
             let sandbox = decode_sandbox_record(&current_record)?;
+            if sandbox.metadata.as_ref().is_some_and(|m| {
+                m.annotations
+                    .get(openshell_core::driver_utils::ANNOTATION_BINDING_PENDING)
+                    .map(String::as_str)
+                    == Some("true")
+            }) {
+                return Ok(());
+            }
             let age_ms =
                 openshell_core::time::now_ms().saturating_sub(current_record.created_at_ms);
             if age_ms < grace_ms {
@@ -3445,7 +3512,7 @@ pub async fn connect_remote_compute_driver(
     ))
 }
 
-fn driver_sandbox_from_public(
+pub fn driver_sandbox_from_public(
     sandbox: &Sandbox,
     driver_name: &str,
 ) -> Result<DriverSandbox, Box<Status>> {
@@ -4297,6 +4364,8 @@ pub async fn new_test_runtime_with_driver(
 ) -> ComputeRuntime {
     ComputeRuntime {
         driver: TracedDriver::new(driver, "test".to_string()),
+        #[cfg(all(not(target_os = "windows"), feature = "in-tree-compute-drivers"))]
+        prewarm_driver: None,
         driver_info: ComputeDriverInfoSnapshot {
             name: driver_name.to_string(),
             driver_name: driver_name.to_string(),
@@ -4983,6 +5052,8 @@ mod tests {
         let store = Arc::new(Store::connect("sqlite::memory:").await.unwrap());
         ComputeRuntime {
             driver: TracedDriver::new(driver, "test-driver".to_string()),
+            #[cfg(all(not(target_os = "windows"), feature = "in-tree-compute-drivers"))]
+            prewarm_driver: None,
             driver_info: ComputeDriverInfoSnapshot {
                 name: driver_name.to_string(),
                 driver_name: driver_name.to_string(),
@@ -5521,6 +5592,58 @@ mod tests {
     async fn sqlite_store_is_single_replica() {
         let store = Arc::new(Store::connect("sqlite::memory:").await.unwrap());
         assert!(store.is_single_replica());
+    }
+
+    #[tokio::test]
+    async fn prewarm_pending_binding_blocks_ordinary_lifecycle_mutations() {
+        let store = Arc::new(Store::connect("sqlite::memory:").await.unwrap());
+        let runtime = new_test_runtime(store.clone()).await;
+        let mut sandbox = Sandbox {
+            metadata: Some(openshell_core::proto::datamodel::v1::ObjectMeta {
+                id: "prewarm-pending".into(),
+                name: "pending".into(),
+                workspace: "default".into(),
+                annotations: HashMap::from([(
+                    openshell_core::driver_utils::ANNOTATION_BINDING_PENDING.into(),
+                    "true".into(),
+                )]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        sandbox.set_phase(SandboxPhase::Ready as i32);
+        runtime.persist_retained_sandbox(sandbox).await.unwrap();
+        assert_eq!(
+            runtime
+                .stop_sandbox("default", "pending")
+                .await
+                .unwrap_err()
+                .code(),
+            Code::FailedPrecondition
+        );
+        assert_eq!(
+            runtime
+                .start_sandbox("default", "pending")
+                .await
+                .unwrap_err()
+                .code(),
+            Code::FailedPrecondition
+        );
+        assert_eq!(
+            runtime
+                .delete_sandbox("default", "pending")
+                .await
+                .unwrap_err()
+                .code(),
+            Code::FailedPrecondition
+        );
+        assert!(
+            store
+                .get_message::<Sandbox>("prewarm-pending")
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]

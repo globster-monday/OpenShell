@@ -521,6 +521,16 @@ fn main() -> Result<()> {
     // emptyDir volume that the agent container then executes from.
     let raw_args: Vec<String> = std::env::args().collect();
     #[cfg(target_os = "linux")]
+    if raw_args.get(1).map(String::as_str) == Some(openshell_sandbox::binding_workspace::SUBCOMMAND)
+    {
+        if raw_args.len() != 2 {
+            return Err(miette::miette!(
+                "bound workspace initializer takes no arguments"
+            ));
+        }
+        return openshell_sandbox::binding_workspace::run();
+    }
+    #[cfg(target_os = "linux")]
     if raw_args.get(1).map(String::as_str) == Some(openshell_sandbox::binding_gate::SUBCOMMAND) {
         return openshell_sandbox::binding_gate::run(&raw_args[2..]);
     }

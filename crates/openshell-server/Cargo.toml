@@ -90,13 +90,14 @@ pin-project-lite = { workspace = true }
 ring = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+ryu-js = "1"
 toml = { workspace = true }
 tokio-stream = { workspace = true }
 sqlx = { workspace = true }
 reqwest = { workspace = true }
 aws-config = { workspace = true }
 aws-sdk-sts = { workspace = true }
-uuid = { workspace = true }
+uuid = { workspace = true, features = ["serde"] }
 hmac = "0.12"
 sha2 = { workspace = true }
 jsonwebtoken = { workspace = true }

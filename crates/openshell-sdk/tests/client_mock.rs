@@ -100,6 +100,34 @@ fn workspace_proto(name: &str, phase: proto::datamodel::v1::WorkspacePhase) -> p
 
 #[tonic::async_trait]
 impl OpenShell for TestOpenShell {
+    async fn prepare_prewarm_slot(
+        &self,
+        _request: tonic::Request<proto::PrewarmSlotRequest>,
+    ) -> Result<Response<proto::PrewarmSlotResponse>, Status> {
+        Err(Status::unimplemented("unused"))
+    }
+
+    async fn observe_prewarm_slot(
+        &self,
+        _request: tonic::Request<proto::PrewarmSlotRequest>,
+    ) -> Result<Response<proto::PrewarmSlotResponse>, Status> {
+        Err(Status::unimplemented("unused"))
+    }
+
+    async fn bind_prewarm_slot(
+        &self,
+        _request: tonic::Request<proto::PrewarmSlotRequest>,
+    ) -> Result<Response<proto::PrewarmSlotResponse>, Status> {
+        Err(Status::unimplemented("unused"))
+    }
+
+    async fn retire_prewarm_slot(
+        &self,
+        _request: tonic::Request<proto::PrewarmSlotRequest>,
+    ) -> Result<Response<proto::PrewarmSlotResponse>, Status> {
+        Err(Status::unimplemented("unused"))
+    }
+
     async fn report_main_process_exit(
         &self,
         _request: tonic::Request<proto::ReportMainProcessExitRequest>,

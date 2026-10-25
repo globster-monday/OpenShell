@@ -3450,6 +3450,17 @@ async fn handle_update_config_inner(
         .ok_or_else(|| Status::not_found("sandbox not found"))?;
     let sandbox_id = sandbox.object_id().to_string();
     let mut response_annotations = sandbox_metadata_annotations(&sandbox);
+    if sandbox.metadata.as_ref().is_some_and(|metadata| {
+        metadata
+            .annotations
+            .get(openshell_core::driver_utils::ANNOTATION_BINDING_PENDING)
+            .map(String::as_str)
+            == Some("true")
+    }) {
+        return Err(Status::failed_precondition(
+            "native retained sandbox binding has not released its initial launch",
+        ));
+    }
 
     if has_setting {
         let _settings_guard = state.settings_mutex.lock().await;

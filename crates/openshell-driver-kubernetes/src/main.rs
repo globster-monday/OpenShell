@@ -257,6 +257,7 @@ async fn main() -> Result<()> {
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let driver = KubernetesComputeDriver::new(
         KubernetesComputeConfig {
+            prewarm: None,
             process_bootstrap: Vec::new(),
             process_bootstraps: std::collections::HashMap::new(),
             workspace_mode: args.workspace_mode,

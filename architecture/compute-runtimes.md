@@ -19,6 +19,101 @@ Each runtime receives a sandbox spec from the gateway and is responsible for:
 - Reporting lifecycle and platform events back to the gateway.
 - Cleaning up runtime-owned resources.
 
+### Native prewarm status
+
+`PreparePrewarmSlot`, `ObservePrewarmSlot`, `BindPrewarmSlot` and
+`RetirePrewarmSlot` provide the opt-in native prewarm v1 transport on `openshell.v1.OpenShell`.
+They use `PrewarmSlotRequest.request_json` and
+`PrewarmSlotResponse.evidence_json`. The request is marked secret in protobuf
+metadata. Requests are bounded to 1 MiB of UTF-8, and the evidence limit is
+also 1 MiB. All four methods require a user/service platform-admin principal;
+observation requires `sandbox:read`, and mutations require `sandbox:write` when
+scope enforcement is enabled. Sandbox callbacks cannot invoke them.
+
+Only the in-tree Kubernetes backend implements these methods. New preparation
+and binding require an explicit approved immutable-artifact configuration.
+Disabled/other backends return `UNIMPLEMENTED`; unsupported placement, topology,
+artifacts and initial power states never fall back to cold creation.
+
+The warming boundary is **held init**, not an already-running supervisor. Prepare
+creates a real suspended AgentSandbox CR, one direct Pod and a blank exclusive
+RWO PVC. Its receipt contains their actual Kubernetes UIDs. There is no ordinary
+tenant Sandbox row, organization or credential in the idle runtime. The inert
+init container proves the claim is blank and waits for an identity-bound grant.
+Ordinary SA/mTLS mounts remain unavailable to that init container.
+
+A permanent generic database reservation grants one attempt to create the
+permanent fencing ConfigMap. ConfigMap resource-version CAS, not a process-local
+lock, linearizes allocation versus retirement. Every CREATE has a durable,
+single-attempt ticket. Retries discover the original resource and validate its
+UID/ownership; they never replay an issued CREATE. An ambiguous transport outcome,
+including a crash after claiming a ticket but before sending the request, is
+**quarantined** until that original creation becomes discoverable. There is no
+timeout that converts uncertainty into absence. Definitive API rejection permits
+retirement, but not recreation. Permanent reservations and ConfigMaps are never
+garbage-collected by these methods.
+
+Bind commits one allocation, stamps Pod/PVC organization ownership, and uses the
+ordinary workspace, provider-profile, credential-driver, policy and Sandbox
+validation/persistence paths with the reserved workload UUID. Credentials do not
+cross into privileged supervisor environment variables. One writer initializes
+the retained PVC before the main container's persistence subPath is resolved;
+see [Sandbox](sandbox.md). Only a matching successful init termination receipt
+permits adoption by the original Sandbox CR and publication of the startup grant.
+Observe can resume this handoff without replaying credential writes or requiring
+the original request secrets. Exact-allocation retries retain the original IDs.
+Before allocation CAS, all three resource UIDs must still match and none may be
+terminating. Reservations also freeze a hash of the native driver configuration.
+Preparation, binding and a pending adoption handoff reject profile drift rather
+than reinterpreting retained resources with a different supervisor, bootstrap,
+identity or storage configuration. Approval settings are checked separately;
+disabling new preparation does not invalidate retirement.
+
+Unused-slot retirement fences future creation first, settles outstanding
+creation tickets, removes the controller and Pod, observes compute absence, and
+only then removes storage. Allocated slots cannot return to inventory; ordinary
+tenant lifecycle owns them after handoff. A missing or changed retained resource
+is not a replacement warm hit. Partial or indeterminate provisioning produces an
+explicit error, never success-shaped absence.
+
+This implementation and native resource-fixture checks are not approved-artifact
+or customer readiness evidence. Bound results require a real supervisor session,
+loaded policy, current providers, and the agent's authenticated `/health/ready`
+probe before advertising a runtime endpoint. Do not enable a customer pool until
+the maintained agent/recipe/supervisor artifacts and actual create/open journey
+have been verified.
+
+Native v1 currently binds the gateway's legacy agent launch contract, not the
+current assistant lifecycle. The historical gateway adapter supplied this draft
+transport contract; it is not evidence of a current gateway consumer, allocator
+or product integration. Schema version 2 is reserved for the incompatible
+no-recipe assistant contract and returns `UNIMPLEMENTED` before any identity,
+resource or tenant mutation. Supporting it requires the ordinary assistant
+command, data-directory initialization and readiness mapping, not a fabricated
+legacy recipe. A current-assistant consumer cannot enable allocation until that
+native mapping and joined customer behavior are verified.
+
+The replacement gateway contract is the separate draft
+`globster-monday/globster-workload-gateway#250` at
+`bec528d52f978204f4acedd78a811823dae8e1a8`, not a published provider capability.
+Its `src/domain/prewarm-slots.ts` and `openapi/workload-gateway.v1.json` own the
+recipe-free assistant v2 contract; `docs/prewarm-native-contract.md` records the
+native handoff requirements. Preparation includes explicit immutable release
+`serviceVersion` and uses the `globster/prewarm-preparation/v2\0` hash domain.
+The native regression checks that settled golden vector and rejects its v2
+identity. It does not implement assistant initialization or approve an artifact.
+
+The supported native profile is shared-namespace, combined topology with
+explicit UID/GID 1000 and no provider SPIFFE mount. It is not compatible with the
+checked-in staging sidecar profile. That profile retains an operator-owned
+process bootstrap, separate network supervisor and pod `fsGroup`; its Secret
+projection permissions do not satisfy the gate's strict root-only mode-`0400`
+contract. Supporting it requires a reviewed private-grant transport and ordered
+dual-supervisor handoff that preserves the bootstrap, identity drop and original
+Pod/PVC. Do not remove `fsGroup`, relax grant permissions or switch staging to
+combined topology as a workaround. No compatible immutable lifecycle artifact
+or actual staging storage acceptance is established by this implementation.
+
 Drivers report **backend state only**. A driver snapshot with `Ready=True` means
 the underlying compute resource (container, pod, VM) is healthy and running —
 nothing more. Drivers must not gate on supervisor session state or hold
@@ -154,6 +249,11 @@ and attached storage, Kubernetes retains the Sandbox CR and PVC while scaling
 compute to zero, and VM retains its launch request and writable overlay beside
 a stop marker. Delete remains a separate operation that removes these
 resources.
+
+Kubernetes ignores conditions whose `observedGeneration` predates the current
+Sandbox generation. A retained `Suspended` condition must not override readiness
+after adoption or restart; older controllers without generation fields retain
+their existing condition behavior.
 
 On graceful gateway shutdown, persisted running intent for Docker, Podman, and
 VM is stopped through the shared `StopSandbox` RPC before any gateway-managed

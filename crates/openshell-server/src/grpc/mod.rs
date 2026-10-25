@@ -5,6 +5,7 @@
 
 mod auth_rpc;
 pub mod policy;
+mod prewarm;
 pub mod provider;
 mod sandbox;
 mod service;
@@ -224,6 +225,34 @@ impl OpenShellService {
 
 #[tonic::async_trait]
 impl OpenShell for OpenShellService {
+    async fn prepare_prewarm_slot(
+        &self,
+        request: Request<openshell_core::proto::PrewarmSlotRequest>,
+    ) -> Result<Response<openshell_core::proto::PrewarmSlotResponse>, Status> {
+        prewarm::handle_operation(&self.state, request, prewarm::Operation::Prepare).await
+    }
+
+    async fn observe_prewarm_slot(
+        &self,
+        request: Request<openshell_core::proto::PrewarmSlotRequest>,
+    ) -> Result<Response<openshell_core::proto::PrewarmSlotResponse>, Status> {
+        prewarm::handle_operation(&self.state, request, prewarm::Operation::Observe).await
+    }
+
+    async fn bind_prewarm_slot(
+        &self,
+        request: Request<openshell_core::proto::PrewarmSlotRequest>,
+    ) -> Result<Response<openshell_core::proto::PrewarmSlotResponse>, Status> {
+        prewarm::handle_operation(&self.state, request, prewarm::Operation::Bind).await
+    }
+
+    async fn retire_prewarm_slot(
+        &self,
+        request: Request<openshell_core::proto::PrewarmSlotRequest>,
+    ) -> Result<Response<openshell_core::proto::PrewarmSlotResponse>, Status> {
+        prewarm::handle_operation(&self.state, request, prewarm::Operation::Retire).await
+    }
+
     async fn health(
         &self,
         _request: Request<HealthRequest>,

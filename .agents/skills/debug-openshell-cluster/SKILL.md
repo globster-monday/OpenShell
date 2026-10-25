@@ -476,6 +476,26 @@ kubectl -n openshell get configmap openshell-config -o jsonpath='{.data.gateway\
 kubectl -n <sandbox-namespace> get sandbox <sandbox-name> -o jsonpath='{.spec.template.spec.serviceAccountName}{"\n"}'
 ```
 
+For the experimental native prewarm RPCs, check the explicit Kubernetes
+`prewarm` approval section first. New preparation/binding stay disabled without
+it; ordinary cold creation is unaffected. The supported native profile requires
+shared namespace, combined topology, explicit UID/GID 1000, digest-pinned
+agent/recipe/supervisor images and no provider SPIFFE mount. The recipe requires
+image-volume support. A changed native driver profile cannot be adopted into an
+existing receipt. Restore its original profile rather than recreating resources.
+Indeterminate CREATE tickets remain quarantined until the original resource is
+discovered; do not delete permanent fence records or report absence from a timeout.
+See `docs/reference/gateway-config.mdx` for additional platform-only RBAC.
+
+The staging sidecar profile is not native-prewarm compatible: its operator
+bootstrap, dual-supervisor release and `fsGroup`-affected Secret permissions need
+a reviewed private-grant handoff. Never remove `fsGroup`, weaken root-only grants
+or switch staging topology as a debugging workaround. Native v1's legacy agent
+launch also is not current assistant acceptance. Reserved assistant schema
+version 2 returns `UNIMPLEMENTED` before tenant or resource mutation. Do not
+substitute a legacy recipe to bypass it. Keep all customer pools disabled
+until the actual artifact/profile/storage and joined customer journey pass.
+
 If `topology = "sidecar"` is rendered under `[openshell.drivers.kubernetes]`,
 sandbox pods should have an `openshell-network-init` init container running
 `--mode=network-init`, an `agent` container running

@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
+use crate::binding_workspace::{self, WorkspaceInitialization};
+
 pub const SUBCOMMAND: &str = "await-binding";
 pub const GRANT_VERSION: u32 = 1;
 const MAX_GRANT_BYTES: u64 = 1024 * 1024;
@@ -37,12 +39,19 @@ struct GateArgs {
     grant: PathBuf,
     #[arg(long, default_value_t = MAX_WAIT_SECONDS)]
     wait_seconds: u64,
+    /// Reject grants without retained-pod workspace initialization.
+    #[arg(long)]
+    require_workspace_initialization: bool,
+    /// Held init-container mode. Initialize once, publish a sanitized Kubernetes
+    /// termination receipt and exit without ever constructing a supervisor.
+    #[arg(long)]
+    initialize_only: bool,
     /// Normal supervisor flags; no workload command override.
     #[arg(last = true)]
     supervisor_args: Vec<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BoundLaunchGrant {
     pub version: u32,
@@ -53,6 +62,8 @@ pub struct BoundLaunchGrant {
     pub allocation_id: Uuid,
     pub main_process: MainProcessConfig,
     pub environment: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_initialization: Option<WorkspaceInitialization>,
 }
 
 impl BoundLaunchGrant {
@@ -87,6 +98,14 @@ impl BoundLaunchGrant {
                 .any(|(key, value)| !valid_environment_key(key) || value.contains('\0'))
         {
             return Err(miette::miette!("invalid bound workload environment"));
+        }
+        if expected.require_workspace_initialization && self.workspace_initialization.is_none() {
+            return Err(miette::miette!(
+                "bound workspace initialization is required"
+            ));
+        }
+        if let Some(initialization) = &self.workspace_initialization {
+            initialization.validate()?;
         }
         Ok(())
     }
@@ -163,12 +182,51 @@ pub fn run(arguments: &[String]) -> Result<()> {
         ));
     }
     let deadline = Instant::now() + Duration::from_secs(args.wait_seconds);
+    if args.initialize_only {
+        binding_workspace::verify_prepared_blank(&serde_json::json!({
+            "slotId":args.slot_id,"generation":args.generation,"podUid":args.pod_uid,"sandboxId":args.sandbox_id,
+        }))?;
+        eprintln!(
+            "OpenShell held-init ready slot={} generation={} pod={} sandbox={}",
+            args.slot_id, args.generation, args.pod_uid, args.sandbox_id
+        );
+    }
     eprintln!("Waiting for committed workload binding");
     loop {
         if Instant::now() >= deadline {
             return Err(miette::miette!("workload binding deadline exceeded"));
         }
         if let Some(grant) = read_grant(&args.grant, &args)? {
+            if args.initialize_only {
+                binding_workspace::prepare_blank_claim()?;
+            }
+            // Hold the pod-private lock until exec closes it. The initializer
+            // finishes as UID/GID 1000 before the privileged supervisor exists.
+            let _writer = binding_workspace::initialize_retained_pod(&grant, deadline)?;
+            if args.initialize_only {
+                use sha2::{Digest, Sha256};
+                let canonical =
+                    serde_json::to_vec(&serde_json::to_value(&grant).into_diagnostic()?)
+                        .into_diagnostic()?;
+                let receipt = serde_json::json!({
+                    "version": 1,
+                    "slotId": grant.slot_id,
+                    "generation": grant.generation,
+                    "podUid": grant.pod_uid,
+                    "sandboxId": grant.sandbox_id,
+                    "allocationId": grant.allocation_id,
+                    "grantHash": format!("{:x}", Sha256::digest(canonical)),
+                });
+                std::fs::write(
+                    "/dev/termination-log",
+                    serde_json::to_vec(&receipt).into_diagnostic()?,
+                )
+                .into_diagnostic()?;
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(miette::miette!("workload binding deadline exceeded"));
+            }
             let mut command =
                 std::process::Command::new(std::env::current_exe().into_diagnostic()?);
             command
@@ -200,6 +258,8 @@ mod tests {
             sandbox_id: Uuid::from_u128(3),
             grant: PathBuf::from("/run/openshell-binding/grant.json"),
             wait_seconds: 60,
+            require_workspace_initialization: false,
+            initialize_only: false,
             supervisor_args: Vec::new(),
         }
     }
@@ -219,6 +279,7 @@ mod tests {
                 tty: false,
             },
             environment: HashMap::from([("AGENT_ID".to_string(), "tenant-agent".to_string())]),
+            workspace_initialization: None,
         }
     }
 
@@ -272,5 +333,26 @@ mod tests {
             candidate.main_process.command = command;
             assert!(candidate.validate(&expected()).is_err());
         }
+    }
+
+    #[test]
+    fn required_initialization_cannot_be_omitted_or_supply_malformed_configuration() {
+        let mut expected = expected();
+        expected.require_workspace_initialization = true;
+        let mut candidate = grant();
+        assert!(candidate.validate(&expected).is_err());
+        candidate.workspace_initialization = Some(WorkspaceInitialization {
+            recipe_id: "base-agent".into(),
+            recipe_digest: format!("sha256:{}", "a".repeat(64)),
+            initial_configuration_json: None,
+        });
+        candidate.validate(&expected).unwrap();
+        candidate
+            .workspace_initialization
+            .as_mut()
+            .unwrap()
+            .initial_configuration_json = Some("secret-malformed-configuration".into());
+        let error = candidate.validate(&expected).unwrap_err();
+        assert!(!format!("{error:?}").contains("secret-malformed-configuration"));
     }
 }

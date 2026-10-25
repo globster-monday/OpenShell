@@ -610,6 +610,59 @@ The gateway verifies supervisor JWT-SVIDs with JWT bundles fetched from the
 SPIFFE Workload API, so this validation path does not require gateway access to
 the SPIRE OIDC discovery endpoint or its TLS CA.
 
+#### Native single-use prewarm (opt-in)
+
+Keep this capability disabled until reviewed immutable artifacts, the exact
+runtime profile and customer acceptance are available:
+
+```toml
+[openshell.drivers.kubernetes.prewarm]
+enabled = false
+provider_artifact = "reviewed-native-artifact-version"
+placement_key = "reviewed-placement"
+image = "registry.example/agent@sha256:<64 lowercase hex digits>"
+recipe_id = "reviewed-recipe"
+recipe_digest = "sha256:<reviewed recipe content digest>"
+recipe_image = "registry.example/recipe@sha256:<64 lowercase hex digits>"
+```
+
+The driver's `supervisor_image` must also be digest-pinned. This is not a pool
+configuration or automatic artifact approval. Shared namespace, combined topology,
+explicit `sandbox_uid = 1000` and `sandbox_gid = 1000`, and no provider SPIFFE mount
+are required. Do not rely on namespace identity auto-detection for this path.
+The recipe uses an image
+volume even when the supervisor uses init-container sideloading.
+
+The existing staging sidecar profile is unsupported. Its operator bootstrap,
+dual-supervisor startup and `fsGroup`-affected Secret projection require a reviewed
+private-grant handoff; do not change staging topology or weaken grant permissions
+to enable this configuration. Native v1 also binds the legacy agent launch
+contract, not the current assistant lifecycle. Assistant schema version 2 is
+reserved and returns `UNIMPLEMENTED` before resource or tenant mutation.
+
+Preparation freezes the driver configuration outside this approval section.
+Binding and pending adoption reject configuration drift, including a different
+supervisor image, bootstrap, identity or storage class. Restore the original
+profile to resume an allocated handoff; retire unused slots under their original
+namespace/storage configuration. Configuration changes never authorize rebuilding
+a slot under its old receipt.
+
+The stock shared-mode chart intentionally does not grant these additional
+permissions. An operator enabling prewarm must separately grant the gateway's
+service account namespace-scoped `get/create/update/patch/delete` for Pods,
+PersistentVolumeClaims, ConfigMaps and Secrets, plus `get` on `pods/log`, alongside
+ordinary Sandbox CR permissions and owner-reference/finalizer authorization.
+Do not grant these permissions to sandbox service accounts. Permanent reservation
+ConfigMaps must not be removed by TTL cleanup, tenant ownership cleanup or pool
+resizing. Requests/evidence are limited to 1 MiB and must never be logged with
+credentials. Ambiguous CREATEs remain quarantined indefinitely until settled.
+
+See [compute-driver availability](sandbox-compute-drivers) for support limits.
+Set `enabled = false` to disable new preparation/binding while preserving reserved
+PVC protection and observation/retirement. Retain the section and namespace/storage
+configuration until all unused claims are retired; do not disable their protection
+while idle capacity exists. No customer pool should be enabled from configuration alone.
+
 ### Docker
 
 Sandboxes run as containers on a local bridge network. The supervisor binary is bind-mounted from the host (no in-cluster image pull required); guest mTLS material is supplied as host paths.

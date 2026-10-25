@@ -138,6 +138,18 @@ pub(super) async fn fetch_and_authorize_sandbox(
             e
         }
     })?;
+    if !matches!(principal, crate::auth::principal::Principal::Sandbox(_))
+        && sandbox.metadata.as_ref().is_some_and(|m| {
+            m.annotations
+                .get(openshell_core::driver_utils::ANNOTATION_BINDING_PENDING)
+                .map(String::as_str)
+                == Some("true")
+        })
+    {
+        return Err(Status::failed_precondition(
+            "native retained sandbox binding has not released its initial launch",
+        ));
+    }
     Ok(sandbox)
 }
 
@@ -157,7 +169,7 @@ pub(super) async fn handle_create_sandbox(
     request: Request<CreateSandboxRequest>,
 ) -> Result<Response<SandboxResponse>, Status> {
     let create_request = request.get_ref().clone();
-    let result = handle_create_sandbox_inner(state, request).await;
+    let result = handle_create_sandbox_inner(state, request, None).await;
     emit_sandbox_create_telemetry(
         state,
         &create_request,
@@ -213,6 +225,7 @@ fn telemetry_compute_driver(
 async fn handle_create_sandbox_inner(
     state: &Arc<ServerState>,
     request: Request<CreateSandboxRequest>,
+    reserved_id: Option<&str>,
 ) -> Result<Response<SandboxResponse>, Status> {
     let principal = super::extract_principal(&request)?;
     let request = request.into_inner();
@@ -297,7 +310,7 @@ async fn handle_create_sandbox_inner(
     )
     .await?;
 
-    let id = uuid::Uuid::new_v4().to_string();
+    let id = reserved_id.map_or_else(|| uuid::Uuid::new_v4().to_string(), str::to_owned);
     let name = if request.name.is_empty() {
         generate_routable_name()
     } else {
@@ -345,6 +358,13 @@ async fn handle_create_sandbox_inner(
             status
         })?;
 
+    if reserved_id.is_some() {
+        let sandbox = state.compute.persist_retained_sandbox(sandbox).await?;
+        return Ok(Response::new(SandboxResponse {
+            sandbox: Some(sandbox),
+        }));
+    }
+
     // Mint the gateway JWT for singleplayer drivers. K8s sandboxes skip
     // this mint and bootstrap via `IssueSandboxToken` at supervisor
     // startup; identifying "is this K8s?" lives in the compute layer, so
@@ -375,6 +395,18 @@ async fn handle_create_sandbox_inner(
     Ok(Response::new(SandboxResponse {
         sandbox: Some(sandbox),
     }))
+}
+
+pub(super) async fn persist_bound_sandbox(
+    state: &Arc<ServerState>,
+    request: Request<CreateSandboxRequest>,
+    reserved_id: &str,
+) -> Result<Sandbox, Status> {
+    handle_create_sandbox_inner(state, request, Some(reserved_id))
+        .await?
+        .into_inner()
+        .sandbox
+        .ok_or_else(|| Status::internal("missing retained sandbox"))
 }
 
 pub(super) async fn handle_get_sandbox(

@@ -267,6 +267,22 @@ mod tests {
     const FUTURE_RPC: &str = "/openshell.v1.OpenShell/FutureRpc";
 
     #[test]
+    fn prewarm_operations_require_platform_authority_not_workspace_or_sandbox_identity() {
+        for (method, scope) in [
+            ("PreparePrewarmSlot", "sandbox:write"),
+            ("ObservePrewarmSlot", "sandbox:read"),
+            ("BindPrewarmSlot", "sandbox:write"),
+            ("RetirePrewarmSlot", "sandbox:write"),
+        ] {
+            let entry = lookup(&format!("/openshell.v1.OpenShell/{method}")).unwrap();
+            assert_eq!(entry.auth_mode, AuthMode::Bearer);
+            assert_eq!(entry.global_role.as_deref(), Some("platform_admin"));
+            assert_eq!(entry.workspace_role, None);
+            assert_eq!(entry.scope.as_deref(), Some(scope));
+        }
+    }
+
+    #[test]
     fn every_proto_rpc_has_authorization_option() {
         let pool = DescriptorPool::decode(openshell_core::FILE_DESCRIPTOR_SET)
             .expect("decode descriptor set");

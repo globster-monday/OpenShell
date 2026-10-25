@@ -33,6 +33,14 @@ pub const LABEL_SANDBOX_WORKSPACE: &str = "openshell.ai/sandbox-workspace";
 /// Label carrying the gateway identity on managed namespaces.
 pub const LABEL_GATEWAY_ID: &str = "openshell.ai/gateway-id";
 
+/// A native retained-pod binding must finish before ordinary lifecycle mutations.
+pub const ANNOTATION_BINDING_PENDING: &str = "openshell.io/binding-pending";
+/// Marks an exclusively reserved external claim, including before allocation.
+pub const LABEL_PREWARM_SLOT_ID: &str = "globster.dev/prewarm-slot-id";
+pub const LABEL_PREWARM_WORKLOAD_ID: &str = "globster.dev/workload-id";
+/// Ordinary driver reuse of a bound claim is restricted to its actual workspace.
+pub const ANNOTATION_BOUND_WORKSPACE: &str = "openshell.io/bound-workspace";
+
 /// Label selector that matches all OpenShell-managed resources which carry a
 /// sandbox ID label.  Used by list and watch operations to exclude foreign
 /// resources from the same namespace.

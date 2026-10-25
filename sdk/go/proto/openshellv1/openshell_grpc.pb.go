@@ -24,6 +24,10 @@ const _ = grpc.SupportPackageIsVersion9
 
 const (
 	OpenShell_Health_FullMethodName                        = "/openshell.v1.OpenShell/Health"
+	OpenShell_PreparePrewarmSlot_FullMethodName            = "/openshell.v1.OpenShell/PreparePrewarmSlot"
+	OpenShell_ObservePrewarmSlot_FullMethodName            = "/openshell.v1.OpenShell/ObservePrewarmSlot"
+	OpenShell_BindPrewarmSlot_FullMethodName               = "/openshell.v1.OpenShell/BindPrewarmSlot"
+	OpenShell_RetirePrewarmSlot_FullMethodName             = "/openshell.v1.OpenShell/RetirePrewarmSlot"
 	OpenShell_GetCurrentUser_FullMethodName                = "/openshell.v1.OpenShell/GetCurrentUser"
 	OpenShell_GetGatewayInfo_FullMethodName                = "/openshell.v1.OpenShell/GetGatewayInfo"
 	OpenShell_CreateSandbox_FullMethodName                 = "/openshell.v1.OpenShell/CreateSandbox"
@@ -108,6 +112,13 @@ const (
 type OpenShellClient interface {
 	// Check the health of the service.
 	Health(ctx context.Context, in *HealthRequest, opts ...grpc.CallOption) (*HealthResponse, error)
+	// Reserved native single-use slot operations. These require platform
+	// authorization, not a sandbox identity or tenant workspace membership.
+	// Unsupported drivers/artifacts return UNIMPLEMENTED, never readiness evidence.
+	PreparePrewarmSlot(ctx context.Context, in *PrewarmSlotRequest, opts ...grpc.CallOption) (*PrewarmSlotResponse, error)
+	ObservePrewarmSlot(ctx context.Context, in *PrewarmSlotRequest, opts ...grpc.CallOption) (*PrewarmSlotResponse, error)
+	BindPrewarmSlot(ctx context.Context, in *PrewarmSlotRequest, opts ...grpc.CallOption) (*PrewarmSlotResponse, error)
+	RetirePrewarmSlot(ctx context.Context, in *PrewarmSlotRequest, opts ...grpc.CallOption) (*PrewarmSlotResponse, error)
 	// Return the authenticated caller identity established by the gateway.
 	GetCurrentUser(ctx context.Context, in *GetCurrentUserRequest, opts ...grpc.CallOption) (*GetCurrentUserResponse, error)
 	// Fetch elevated live gateway runtime metadata.
@@ -296,6 +307,46 @@ func (c *openShellClient) Health(ctx context.Context, in *HealthRequest, opts ..
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(HealthResponse)
 	err := c.cc.Invoke(ctx, OpenShell_Health_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *openShellClient) PreparePrewarmSlot(ctx context.Context, in *PrewarmSlotRequest, opts ...grpc.CallOption) (*PrewarmSlotResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PrewarmSlotResponse)
+	err := c.cc.Invoke(ctx, OpenShell_PreparePrewarmSlot_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *openShellClient) ObservePrewarmSlot(ctx context.Context, in *PrewarmSlotRequest, opts ...grpc.CallOption) (*PrewarmSlotResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PrewarmSlotResponse)
+	err := c.cc.Invoke(ctx, OpenShell_ObservePrewarmSlot_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *openShellClient) BindPrewarmSlot(ctx context.Context, in *PrewarmSlotRequest, opts ...grpc.CallOption) (*PrewarmSlotResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PrewarmSlotResponse)
+	err := c.cc.Invoke(ctx, OpenShell_BindPrewarmSlot_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *openShellClient) RetirePrewarmSlot(ctx context.Context, in *PrewarmSlotRequest, opts ...grpc.CallOption) (*PrewarmSlotResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PrewarmSlotResponse)
+	err := c.cc.Invoke(ctx, OpenShell_RetirePrewarmSlot_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1020,6 +1071,13 @@ func (c *openShellClient) ListWorkspaceMembers(ctx context.Context, in *ListWork
 type OpenShellServer interface {
 	// Check the health of the service.
 	Health(context.Context, *HealthRequest) (*HealthResponse, error)
+	// Reserved native single-use slot operations. These require platform
+	// authorization, not a sandbox identity or tenant workspace membership.
+	// Unsupported drivers/artifacts return UNIMPLEMENTED, never readiness evidence.
+	PreparePrewarmSlot(context.Context, *PrewarmSlotRequest) (*PrewarmSlotResponse, error)
+	ObservePrewarmSlot(context.Context, *PrewarmSlotRequest) (*PrewarmSlotResponse, error)
+	BindPrewarmSlot(context.Context, *PrewarmSlotRequest) (*PrewarmSlotResponse, error)
+	RetirePrewarmSlot(context.Context, *PrewarmSlotRequest) (*PrewarmSlotResponse, error)
 	// Return the authenticated caller identity established by the gateway.
 	GetCurrentUser(context.Context, *GetCurrentUserRequest) (*GetCurrentUserResponse, error)
 	// Fetch elevated live gateway runtime metadata.
@@ -1206,6 +1264,18 @@ type UnimplementedOpenShellServer struct{}
 
 func (UnimplementedOpenShellServer) Health(context.Context, *HealthRequest) (*HealthResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Health not implemented")
+}
+func (UnimplementedOpenShellServer) PreparePrewarmSlot(context.Context, *PrewarmSlotRequest) (*PrewarmSlotResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method PreparePrewarmSlot not implemented")
+}
+func (UnimplementedOpenShellServer) ObservePrewarmSlot(context.Context, *PrewarmSlotRequest) (*PrewarmSlotResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ObservePrewarmSlot not implemented")
+}
+func (UnimplementedOpenShellServer) BindPrewarmSlot(context.Context, *PrewarmSlotRequest) (*PrewarmSlotResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method BindPrewarmSlot not implemented")
+}
+func (UnimplementedOpenShellServer) RetirePrewarmSlot(context.Context, *PrewarmSlotRequest) (*PrewarmSlotResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RetirePrewarmSlot not implemented")
 }
 func (UnimplementedOpenShellServer) GetCurrentUser(context.Context, *GetCurrentUserRequest) (*GetCurrentUserResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetCurrentUser not implemented")
@@ -1443,6 +1513,78 @@ func _OpenShell_Health_Handler(srv interface{}, ctx context.Context, dec func(in
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(OpenShellServer).Health(ctx, req.(*HealthRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _OpenShell_PreparePrewarmSlot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PrewarmSlotRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(OpenShellServer).PreparePrewarmSlot(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: OpenShell_PreparePrewarmSlot_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(OpenShellServer).PreparePrewarmSlot(ctx, req.(*PrewarmSlotRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _OpenShell_ObservePrewarmSlot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PrewarmSlotRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(OpenShellServer).ObservePrewarmSlot(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: OpenShell_ObservePrewarmSlot_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(OpenShellServer).ObservePrewarmSlot(ctx, req.(*PrewarmSlotRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _OpenShell_BindPrewarmSlot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PrewarmSlotRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(OpenShellServer).BindPrewarmSlot(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: OpenShell_BindPrewarmSlot_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(OpenShellServer).BindPrewarmSlot(ctx, req.(*PrewarmSlotRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _OpenShell_RetirePrewarmSlot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PrewarmSlotRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(OpenShellServer).RetirePrewarmSlot(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: OpenShell_RetirePrewarmSlot_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(OpenShellServer).RetirePrewarmSlot(ctx, req.(*PrewarmSlotRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -2594,6 +2736,22 @@ var OpenShell_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Health",
 			Handler:    _OpenShell_Health_Handler,
+		},
+		{
+			MethodName: "PreparePrewarmSlot",
+			Handler:    _OpenShell_PreparePrewarmSlot_Handler,
+		},
+		{
+			MethodName: "ObservePrewarmSlot",
+			Handler:    _OpenShell_ObservePrewarmSlot_Handler,
+		},
+		{
+			MethodName: "BindPrewarmSlot",
+			Handler:    _OpenShell_BindPrewarmSlot_Handler,
+		},
+		{
+			MethodName: "RetirePrewarmSlot",
+			Handler:    _OpenShell_RetirePrewarmSlot_Handler,
 		},
 		{
 			MethodName: "GetCurrentUser",
