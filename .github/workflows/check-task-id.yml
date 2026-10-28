@@ -1,0 +1,19 @@
+name: check-task-id
+
+# Runs on every base branch, not just main: a stacked child PR opens against its
+# parent task branch, and a missing or malformed Task-ID must fail then — not
+# minutes before the merge, when GitHub re-targets the PR onto main.
+on:
+  pull_request_target:
+    types: [opened, edited, synchronize, reopened]
+
+jobs:
+  check-task-id:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: globster-monday/workspace/.github/actions/check-task-id@main
+        with:
+          pr-author: ${{ github.event.pull_request.user.login }}
+          pr-body: ${{ github.event.pull_request.body }}
+          app-id: ${{ secrets.TASK_SYNC_APP_ID }}
+          app-private-key: ${{ secrets.TASK_SYNC_APP_PRIVATE_KEY }}
