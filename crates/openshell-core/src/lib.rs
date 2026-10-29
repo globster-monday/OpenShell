@@ -36,6 +36,8 @@ pub mod oauth;
 pub mod operator_namespace_allowlist;
 pub mod paths;
 pub mod policy;
+#[cfg(unix)]
+pub mod prewarm_grant;
 pub mod progress;
 pub mod proposals;
 pub mod proto;

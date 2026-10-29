@@ -114,6 +114,26 @@ Pod/PVC. Do not remove `fsGroup`, relax grant permissions or switch staging to
 combined topology as a workaround. No compatible immutable lifecycle artifact
 or actual staging storage acceptance is established by this implementation.
 
+On October 29, 2026 the owner approved option A for implementation: fixed
+Kubernetes exec streams to root-private pod-local grants, the existing static
+assistant bootstrap and network-before-process release. This is code/test
+authorization, not deployment, RBAC activation, release or pool enablement.
+The first implementation step adds the fixed `deliver-binding-grant` and
+`binding-grant-status` sandbox helpers and their shared protocol. They use only
+the existing root-owned mode-`0700` binding-state directory, verify the prepared
+slot/generation/Pod/Sandbox identity and accept the bounded grant on stdin.
+Publication leaves a durable one-shot ticket and atomically links a mode-`0400`
+file without overwriting an earlier grant. Recovery returns only identity and
+hash evidence; interrupted delivery cannot be replayed. A nonsecret handshake
+precedes grant input so the native caller can recheck the exact running container
+and issue its resource-side delivery ticket before sending secrets.
+
+The helpers are not yet connected to native allocation or granted Kubernetes
+exec authority. Native v2 still fails closed. Remaining implementation must wire
+resource-side delivery fencing and read-only settlement, retained-pod assistant
+initialization, the allowlisted static bootstrap and ordered sidecar release.
+No projected-grant permission is relaxed and no readiness proof is implied.
+
 Drivers report **backend state only**. A driver snapshot with `Ready=True` means
 the underlying compute resource (container, pod, VM) is healthy and running —
 nothing more. Drivers must not gate on supervisor session state or hold

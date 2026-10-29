@@ -18,7 +18,7 @@ use crate::binding_workspace::{self, WorkspaceInitialization};
 
 pub const SUBCOMMAND: &str = "await-binding";
 pub const GRANT_VERSION: u32 = 1;
-const MAX_GRANT_BYTES: u64 = 1024 * 1024;
+const MAX_GRANT_BYTES: u64 = openshell_core::prewarm_grant::MAX_GRANT_BYTES;
 const MAX_COMMAND_ARGS: usize = 128;
 const MAX_ARGUMENT_BYTES: usize = 4096;
 const MAX_ENVIRONMENT_ENTRIES: usize = 256;

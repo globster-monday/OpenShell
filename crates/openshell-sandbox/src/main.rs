@@ -534,6 +534,21 @@ fn main() -> Result<()> {
     if raw_args.get(1).map(String::as_str) == Some(openshell_sandbox::binding_gate::SUBCOMMAND) {
         return openshell_sandbox::binding_gate::run(&raw_args[2..]);
     }
+    #[cfg(target_os = "linux")]
+    if matches!(
+        raw_args.get(1).map(String::as_str),
+        Some(
+            openshell_core::prewarm_grant::DELIVER_SUBCOMMAND
+                | openshell_core::prewarm_grant::STATUS_SUBCOMMAND
+        )
+    ) {
+        if raw_args.len() != 2 {
+            return Err(miette::miette!("private grant helper takes no arguments"));
+        }
+        return openshell_core::prewarm_grant::run_helper(
+            raw_args[1] == openshell_core::prewarm_grant::STATUS_SUBCOMMAND,
+        );
+    }
     if raw_args.get(1).map(String::as_str) == Some(COPY_SELF_SUBCOMMAND) {
         let dest = raw_args.get(2).ok_or_else(|| {
             miette::miette!("usage: openshell-sandbox {COPY_SELF_SUBCOMMAND} <DEST>")

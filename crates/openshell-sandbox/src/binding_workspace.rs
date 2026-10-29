@@ -34,8 +34,8 @@ const MAX_CONFIGURATION_BYTES: usize = 65_536;
 const MAX_RECIPE_ENTRIES: u64 = 100_000;
 const MAX_RECIPE_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_RECIPE_DEPTH: usize = 64;
-const STATE_MOUNT: &str = "/run/openshell-binding-state";
-const STATE_DIRECTORY: &str = "private";
+const STATE_MOUNT: &str = openshell_core::prewarm_grant::STATE_PATH;
+const STATE_DIRECTORY: &str = openshell_core::prewarm_grant::PRIVATE_DIRECTORY;
 const RECEIPT_FILE: &str = "initialized.json";
 const PENDING_RECEIPT_FILE: &str = "initialized.pending";
 
@@ -284,7 +284,7 @@ pub(crate) fn verify_prepared_blank(identity: &serde_json::Value) -> Result<()> 
     }
     let directory = state.join(STATE_DIRECTORY);
     let _lock = lock_writer(&directory)?;
-    let path = directory.join("blank.json");
+    let path = directory.join(openshell_core::prewarm_grant::PREPARED_RECEIPT);
     let bytes = serde_json::to_vec(identity).into_diagnostic()?;
     if path.exists() {
         let file = OpenOptions::new()
