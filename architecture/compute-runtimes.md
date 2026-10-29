@@ -128,11 +128,19 @@ hash evidence; interrupted delivery cannot be replayed. A nonsecret handshake
 precedes grant input so the native caller can recheck the exact running container
 and issue its resource-side delivery ticket before sending secrets.
 
-The helpers are not yet connected to native allocation or granted Kubernetes
-exec authority. Native v2 still fails closed. Remaining implementation must wire
-resource-side delivery fencing and read-only settlement, retained-pod assistant
-initialization, the allowlisted static bootstrap and ordered sidecar release.
-No projected-grant permission is relaxed and no readiness proof is implied.
+The next increment adds the gateway-side held-init caller behind the unchanged
+public v2 rejection. It uses only the fixed executable/container and bounded
+stdin/stdout protocol. After the nonsecret handshake it revalidates the retained
+Sandbox/Pod/PVC and the original running init container/image, then commits a
+resource-version delivery ticket before sending the grant. An issued ticket can
+only be observed, never resent; recovery accepts exact sanitized status or a
+matching successful termination receipt. Exec transport errors cannot disclose
+grant contents. The existing v1 Secret transport is unchanged.
+
+This caller is not an available v2 capability: preparation/layout validation,
+retained assistant initialization, the allowlisted static bootstrap and ordered
+sidecar release remain incomplete. No Kubernetes exec authority is activated,
+no projected-grant permission is relaxed and no readiness proof is implied.
 
 Drivers report **backend state only**. A driver snapshot with `Ready=True` means
 the underlying compute resource (container, pod, VM) is healthy and running —

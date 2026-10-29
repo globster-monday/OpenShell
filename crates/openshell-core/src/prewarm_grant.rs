@@ -21,6 +21,7 @@ pub const PREPARED_RECEIPT: &str = "blank.json";
 pub const DELIVER_SUBCOMMAND: &str = "deliver-binding-grant";
 pub const STATUS_SUBCOMMAND: &str = "binding-grant-status";
 pub const MAX_GRANT_BYTES: u64 = 1024 * 1024;
+pub const MAX_CONTROL_BYTES: u64 = 4096;
 pub const POD_UID_ENV: &str = "OPENSHELL_PREWARM_POD_UID";
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -349,7 +350,7 @@ fn exchange<R: BufRead, W: Write>(
     pod_uid: &str,
     observe_only: bool,
 ) -> Result<()> {
-    let request: GrantRequest = serde_json::from_value(read_document(input, 4096)?)
+    let request: GrantRequest = serde_json::from_value(read_document(input, MAX_CONTROL_BYTES)?)
         .map_err(|_| miette::miette!("invalid private grant request"))?;
     if request.identity.pod_uid.to_string() != pod_uid {
         return Err(miette::miette!(

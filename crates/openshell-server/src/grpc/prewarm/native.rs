@@ -7,6 +7,7 @@
 
 #![allow(clippy::result_large_err)]
 
+mod private_grant;
 #[cfg(test)]
 mod resource_tests;
 mod tenant;
@@ -100,6 +101,8 @@ struct Slot {
     allocation: Option<Value>,
     intent_hash: Option<String>,
     grant_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    init_delivery: Option<Box<private_grant::Delivery>>,
     initialized: bool,
     tenant_configured: bool,
     launch_released: bool,
@@ -656,6 +659,7 @@ impl Backend<'_> {
             allocation: None,
             intent_hash: None,
             grant_hash: None,
+            init_delivery: None,
             initialized: false,
             tenant_configured: false,
             launch_released: false,
@@ -1117,6 +1121,14 @@ impl Backend<'_> {
         self.stamp("storage").await?;
         self.stamp("compute").await?;
         tenant::configure(self, principal, input).await?;
+        if self.identity.schema_version == 2 {
+            let (cm, mut slot) = self.load().await?;
+            if slot.phase != Phase::Binding || slot.intent_hash.as_deref() != Some(&intent_hash) {
+                return Err(conflict());
+            }
+            slot.tenant_configured = true;
+            self.save(cm, &slot).await?;
+        }
         let (_, slot) = self.load().await?;
         if slot.phase != Phase::Binding || slot.intent_hash.as_deref() != Some(&intent_hash) {
             return Err(conflict());
@@ -1149,6 +1161,12 @@ impl Backend<'_> {
         }
         self.check_profile(&slot)?;
         self.check_resources(&slot).await?;
+        if self.identity.schema_version == 2 {
+            Box::pin(private_grant::settle(self)).await?;
+            return Err(Status::unimplemented(
+                "native assistant initialization and ordered sidecar release are not supported",
+            ));
+        }
         let Some(ticket) = slot.tickets.get("init") else {
             return Ok(());
         };
@@ -1393,6 +1411,14 @@ impl Backend<'_> {
         Ok(())
     }
     async fn grant(&self, kind: &str, grant: &Value) -> Result<(), Status> {
+        if self.identity.schema_version == 2 {
+            return match kind {
+                "init" => Box::pin(private_grant::deliver(self, grant)).await,
+                _ => Err(Status::unimplemented(
+                    "native assistant sidecar release is not supported",
+                )),
+            };
+        }
         let (cm, slot) = self.load().await?;
         if slot.phase != Phase::Binding {
             return Err(conflict());
