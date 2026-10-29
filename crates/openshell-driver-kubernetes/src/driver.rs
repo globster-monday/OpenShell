@@ -1618,7 +1618,11 @@ impl KubernetesComputeDriver {
     }
 
     #[allow(clippy::similar_names)]
-    async fn create_sandbox_inner(&self, sandbox: &Sandbox) -> Result<(), KubernetesDriverError> {
+    /// Render the ordinary driver contract without creating compute.
+    pub async fn render_sandbox(
+        &self,
+        sandbox: &Sandbox,
+    ) -> Result<DynamicObject, KubernetesDriverError> {
         let gpu_requirements = sandbox
             .spec
             .as_ref()
@@ -1744,6 +1748,65 @@ impl KubernetesComputeDriver {
         };
 
         obj.data = data;
+        Ok(obj)
+    }
+
+    pub fn prewarm_context(&self) -> (Client, &KubernetesComputeConfig) {
+        (self.client.clone(), &self.config)
+    }
+
+    async fn create_sandbox_inner(&self, sandbox: &Sandbox) -> Result<(), KubernetesDriverError> {
+        let obj = self.render_sandbox(sandbox).await?;
+        let name = sandbox.name.as_str();
+        let namespace = obj
+            .metadata
+            .namespace
+            .as_deref()
+            .unwrap_or(&self.config.namespace);
+        if let Some(volumes) = obj.data["spec"]["podTemplate"]["spec"]["volumes"].as_array() {
+            for volume in volumes {
+                let Some(claim) = volume["persistentVolumeClaim"]["claimName"].as_str() else {
+                    continue;
+                };
+                let api: Api<k8s_openapi::api::core::v1::PersistentVolumeClaim> =
+                    Api::namespaced(self.client.clone(), namespace);
+                if let Some(pvc) = api
+                    .get_opt(claim)
+                    .await
+                    .map_err(KubernetesDriverError::from_kube)?
+                    && pvc.metadata.labels.as_ref().is_some_and(|l| {
+                        l.contains_key(openshell_core::driver_utils::LABEL_PREWARM_SLOT_ID)
+                    })
+                    && (pvc
+                        .metadata
+                        .annotations
+                        .as_ref()
+                        .and_then(|a| {
+                            a.get(openshell_core::driver_utils::ANNOTATION_BOUND_WORKSPACE)
+                        })
+                        .map(String::as_str)
+                        != Some(sandbox.workspace.as_str())
+                        || pvc
+                            .metadata
+                            .labels
+                            .as_ref()
+                            .and_then(|l| {
+                                l.get(openshell_core::driver_utils::LABEL_PREWARM_WORKLOAD_ID)
+                            })
+                            .map(String::as_str)
+                            != Some(sandbox.id.as_str()))
+                {
+                    return Err(KubernetesDriverError::Precondition(
+                        "reserved native prewarm claim cannot be attached by an ordinary create"
+                            .into(),
+                    ));
+                }
+            }
+        }
+        let agent_sandbox_api = self
+            .supported_agent_sandbox_api(self.client.clone(), namespace)
+            .await
+            .map_err(KubernetesDriverError::Message)?;
         match tokio::time::timeout(
             KUBE_API_TIMEOUT,
             agent_sandbox_api.api.create(&PostParams::default(), &obj),
@@ -4581,6 +4644,7 @@ fn status_from_object(obj: &DynamicObject) -> Option<SandboxStatus> {
         .map(|items| {
             items
                 .iter()
+                .filter(|condition| condition_is_current(obj, condition))
                 .filter_map(condition_from_value)
                 .collect::<Vec<_>>()
         })
@@ -4612,6 +4676,14 @@ fn status_from_object(obj: &DynamicObject) -> Option<SandboxStatus> {
     })
 }
 
+fn condition_is_current(obj: &DynamicObject, condition: &serde_json::Value) -> bool {
+    condition
+        .get("observedGeneration")
+        .and_then(serde_json::Value::as_i64)
+        .zip(obj.metadata.generation)
+        .is_none_or(|(observed, current)| observed >= current)
+}
+
 fn kubernetes_sandbox_has_stopped_condition(obj: &DynamicObject) -> bool {
     obj.data
         .get("status")
@@ -4619,8 +4691,9 @@ fn kubernetes_sandbox_has_stopped_condition(obj: &DynamicObject) -> bool {
         .and_then(serde_json::Value::as_array)
         .is_some_and(|conditions| {
             conditions.iter().any(|condition| {
-                condition.get("type").and_then(serde_json::Value::as_str)
-                    == Some(SANDBOX_SUSPENDED_CONDITION)
+                condition_is_current(obj, condition)
+                    && condition.get("type").and_then(serde_json::Value::as_str)
+                        == Some(SANDBOX_SUSPENDED_CONDITION)
                     && condition
                         .get("status")
                         .and_then(serde_json::Value::as_str)
@@ -4636,8 +4709,9 @@ fn kubernetes_sandbox_stop_failure(obj: &DynamicObject) -> Option<String> {
         .as_array()?
         .iter()
         .find_map(|condition| {
-            let is_terminal = condition.get("type").and_then(serde_json::Value::as_str)
-                == Some(SANDBOX_SUSPENDED_CONDITION)
+            let is_terminal = condition_is_current(obj, condition)
+                && condition.get("type").and_then(serde_json::Value::as_str)
+                    == Some(SANDBOX_SUSPENDED_CONDITION)
                 && condition
                     .get("status")
                     .and_then(serde_json::Value::as_str)
@@ -5171,6 +5245,35 @@ mod tests {
             }
         });
         assert!(kubernetes_sandbox_has_stopped_condition(&sandbox));
+    }
+
+    #[test]
+    fn stale_suspension_cannot_override_current_readiness() {
+        let resource = ApiResource::from_gvk(&GroupVersionKind::gvk(
+            SANDBOX_GROUP,
+            SANDBOX_VERSION_V1BETA1,
+            SANDBOX_KIND,
+        ));
+        let mut sandbox = DynamicObject::new("sandbox", &resource);
+        sandbox.metadata.generation = Some(3);
+        sandbox.data = serde_json::json!({"status": {"conditions": [
+            {"type":"Suspended","status":"True","observedGeneration":1},
+            {"type":"Ready","status":"True","observedGeneration":3}
+        ]}});
+        let status = status_from_object(&sandbox).unwrap();
+        assert_eq!(status.conditions.len(), 1);
+        assert_eq!(status.conditions[0].r#type, "Ready");
+        assert!(!kubernetes_sandbox_has_stopped_condition(&sandbox));
+
+        sandbox.data["status"]["conditions"][0]["observedGeneration"] = serde_json::json!(3);
+        assert!(kubernetes_sandbox_has_stopped_condition(&sandbox));
+
+        sandbox.data["status"]["conditions"][0] = serde_json::json!({
+            "type":"Suspended","status":"False","reason":"PodNotOwned","observedGeneration":1
+        });
+        assert!(kubernetes_sandbox_stop_failure(&sandbox).is_none());
+        sandbox.data["status"]["conditions"][0]["observedGeneration"] = serde_json::json!(3);
+        assert!(kubernetes_sandbox_stop_failure(&sandbox).is_some());
     }
 
     #[test]

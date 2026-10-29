@@ -3163,6 +3163,7 @@ dependencies = [
  "k8s-openapi",
  "kube-core",
  "pem",
+ "rand 0.8.6",
  "rustls 0.23.38",
  "rustls-pemfile",
  "secrecy",
@@ -3171,6 +3172,7 @@ dependencies = [
  "serde_yaml",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-tungstenite 0.21.0",
  "tokio-util",
  "tower 0.4.13",
  "tower-http 0.5.2",
@@ -3906,6 +3908,7 @@ dependencies = [
  "rustix 1.1.4",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tar",
  "tempfile",
  "thiserror 2.0.18",
@@ -3916,6 +3919,7 @@ dependencies = [
  "tonic-prost-build",
  "tracing",
  "url",
+ "uuid",
 ]
 
 [[package]]
@@ -4293,6 +4297,7 @@ dependencies = [
  "rustls 0.23.38",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "temp-env",
  "tempfile",
  "tokio",
@@ -4398,6 +4403,7 @@ dependencies = [
  "rustix 1.1.4",
  "rustls 0.23.38",
  "rustls-pemfile",
+ "ryu-js",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -6078,6 +6084,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
+name = "ryu-js"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "04d056b875a9d2e6cb9a61d127afee9ac5999b9f87bcb32079d1318e505be714"
+
+[[package]]
 name = "salsa20"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7313,6 +7325,18 @@ dependencies = [
 
 [[package]]
 name = "tokio-tungstenite"
+version = "0.21.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c83b561d025642014097b66e6c1bb422783339e0909e4429cde4749d1990bc38"
+dependencies = [
+ "futures-util",
+ "log",
+ "tokio",
+ "tungstenite 0.21.0",
+]
+
+[[package]]
+name = "tokio-tungstenite"
 version = "0.26.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7a9daff607c6d2bf6c16fd681ccb7eecc83e4e2cdc1ca067ffaadfca5de7f084"
@@ -7685,6 +7709,25 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tungstenite"
+version = "0.21.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ef1a641ea34f399a848dea702823bbecfb4c486f911735368f1f137cb8257e1"
+dependencies = [
+ "byteorder",
+ "bytes",
+ "data-encoding",
+ "http 1.4.0",
+ "httparse",
+ "log",
+ "rand 0.8.6",
+ "sha1 0.10.6",
+ "thiserror 1.0.69",
+ "url",
+ "utf-8",
+]
+
+[[package]]
+name = "tungstenite"
 version = "0.26.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4793cb5e56680ecbb1d843515b23b6de9a75eb04b66643e256a396d43be33c13"
@@ -7877,6 +7920,7 @@ checksum = "ddd74a9687298c6858e9b88ec8935ec45d22e8fd5e6394fa1bd4e99a87789c76"
 dependencies = [
  "getrandom 0.4.2",
  "js-sys",
+ "serde_core",
  "wasm-bindgen",
 ]
 

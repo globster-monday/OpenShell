@@ -408,6 +408,27 @@ pub struct KubernetesComputeConfig {
     /// When empty and `sandbox_uid` is set, defaults to the resolved UID.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox_gid: Option<u32>,
+    /// Explicit platform approval for held-init prewarm artifacts and placement.
+    /// Absent by default; ordinary sandbox creation is unaffected.
+    pub prewarm: Option<PrewarmConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrewarmConfig {
+    /// Disable new preparation/binding without disabling reserved-claim protection.
+    #[serde(default = "prewarm_enabled")]
+    pub enabled: bool,
+    pub provider_artifact: String,
+    pub placement_key: String,
+    pub image: String,
+    pub recipe_id: String,
+    pub recipe_digest: String,
+    pub recipe_image: String,
+}
+
+fn prewarm_enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -495,6 +516,7 @@ impl Default for KubernetesComputeConfig {
             provider_spiffe_workload_api_socket_path: String::new(),
             sandbox_uid: None,
             sandbox_gid: None,
+            prewarm: None,
         }
     }
 }

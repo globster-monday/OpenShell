@@ -35,6 +35,95 @@ only when the set is already empty; any other outcome fails the spawn.
 6. It opens a supervisor session back to the gateway for connect, exec, file
    sync, config polling, and log push.
 
+### Trusted binding startup gate (experimental)
+
+On Linux, the internal `await-binding` command can hold supervisor startup
+behind a read-only projected, private root-owned binding grant. The grant
+must match the prepared slot, generation, pod UID and sandbox ID and carry
+a nonempty allocation ID. No supervisor, tenant credential acquisition or
+workload child starts while the grant is absent. Invalid grants fail closed;
+waiting is bounded. The accepted grant supplies the exact main-process argv
+and serialized workload environment before the gate replaces itself with
+the normal supervisor. Workload environment is applied to the child, not
+the privileged supervisor's environment.
+
+The gate can initialize the retained pod's workspace before supervisor exec.
+With `--require-workspace-initialization`, a grant without
+`workspace_initialization` is rejected. The plan contains `recipe_id`,
+`recipe_digest` and optional `initial_configuration_json`. The latter carries
+the gateway's exact canonical UTF-8 bytes, not a reserialized JSON value.
+The gate checks the complete configuration shape and its 64 KiB limit without
+logging its contents. Grants and initialization plans deliberately have no
+`Debug` implementation.
+
+For this path, the resource owner must supply:
+
+- An approved immutable recipe projected read-only at `/recipe/template`.
+  The initializer verifies the read-only filesystem; it does not authenticate
+  the image or infer its identity from files.
+- The exclusive writable claim at `/workspace`, writable by UID/GID 1000.
+  No other pod or sidecar may write this claim during initialization.
+- A separate pod-private writable state volume at
+  `/run/openshell-binding-state`, owned by root and not group- or world-writable.
+  The gate creates a mode-`0700` `private` child directory. The state volume
+  must not be the customer claim or the read-only grant projection.
+
+The root gate holds a nonblocking exclusive writer lock in the private directory.
+It starts its own fixed-function `initialize-bound-workspace` subprocess with
+UID/GID 1000, an empty environment and a bounded stdin plan. No shell, recipe
+script or tenant executable runs. The initializer accepts regular files and
+directories, rejects symlinks, special files and reserved state, and copies into
+a private staging directory. It creates the `workspace` and
+`.globster-openshell-persist` directories, writes the private initial configuration,
+and publishes `<workload UUID>/` using a Linux no-replace rename after syncing
+files and directories. Copying is bounded to 100,000 entries, 1 GiB and 64 levels.
+Recipes outside those limits are unsupported and fail closed.
+
+The `.globster-recipe.json` marker matches the cold materializer's field names,
+including the SHA-256 digest of the exact initial-configuration bytes. A retry
+accepts only the same recipe and configuration marker, preserves existing tenant
+data, and can discard an abandoned private staging directory. It never adopts an
+unmarked workspace or overwrites a different marker. The pod-private lock spans
+initialization and supervisor exec. After the child succeeds, the gate atomically
+publishes `private/initialized.json`, containing the exact binding identity
+and recipe marker but no configuration or credentials. A receipt for another
+allocation is rejected. Initialization failure or deadline expiry prevents
+supervisor startup. The receipt proves initialization only, not a live supervisor
+session or customer readiness.
+
+The gate is not an allocator or authorization API. Its resource owner must
+commit single-use ownership with resource-side fencing and establish policy,
+credentials and ordinary sandbox ownership before publishing the grant.
+The pod-private writer lock does not fence competing gateway replicas or prevent
+another Kubernetes pod from mounting an RWO claim. RWO alone is not a one-writer
+guarantee.
+
+The opt-in native Kubernetes lifecycle uses this gate in a **held init container**
+and again as the main container's startup gate. Preparation verifies a blank
+claim (allowing only an empty filesystem-created `lost+found`) and publishes a
+root-private prepared receipt in the Pod's emptyDir. It does not create tenant
+directories or start the privileged supervisor. The init container has only the
+binary, read-only recipe, blank PVC, private state and optional private init grant;
+it does not mount the ordinary service-account token or mTLS credentials.
+
+At bind, the same init container makes the blank mount writable by UID/GID 1000,
+runs the fixed unprivileged writer, and exits with a sanitized identity- and
+grant-digest-bound termination receipt. The main gate accepts the same private
+initialized receipt and does not write the PVC a second time. Native allocation
+is independently fenced by permanent DB/Kubernetes records; the pod-local lock
+is only the sequential writer guard. See [Compute Runtimes](compute-runtimes.md)
+for creation quarantine, adoption and retirement.
+
+The ordinary Kubernetes launch mounts
+`<workload UUID>/.globster-openshell-persist` at `/sandbox/persist` using a PVC
+`subPath`. Kubelet resolves it before starting the main container, but **after**
+the held init completes. Only the init container mounts the root claim during
+initialization; it does not request that not-yet-existing subPath. This preserves
+the exact ordinary launch paths without changing Pod/PVC identities or adding
+another writer Pod. A restarted/changed physical Pod cannot consume the original
+UID-bound grant. The init gate's wait is bounded to 24 hours; expired or failed
+idle capacity must be retired, never restarted/recycled as a fresh slot.
+
 ## Isolation Layers
 
 OpenShell uses overlapping controls rather than a single sandbox primitive:

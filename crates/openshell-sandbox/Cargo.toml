@@ -46,11 +46,12 @@ rustls = { workspace = true }
 # Serialization (serde_json::json! for OCSF unmapped fields)
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 prost = { workspace = true }
 
 # Logging
 tracing = { workspace = true }
-uuid = { workspace = true }
+uuid = { workspace = true, features = ["serde"] }
 tracing-subscriber = { workspace = true }
 tracing-appender = { workspace = true }
 

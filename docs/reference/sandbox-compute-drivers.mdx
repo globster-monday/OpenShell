@@ -31,6 +31,43 @@ driver. Drivers serialize that specification in
 reconstruct argv with shell parsing. Runtime restart policies are disabled so
 an exited canonical process remains a terminal sandbox error.
 
+## Native Prewarm Availability
+
+The in-tree Kubernetes backend has an opt-in, platform-authorized single-use
+`PreparePrewarmSlot` / `ObservePrewarmSlot` / `BindPrewarmSlot` /
+`RetirePrewarmSlot` lifecycle. Other backends and disabled preparation/binding
+return `UNIMPLEMENTED`. Existing records can still be observed and retired when
+new preparation is disabled.
+
+Supported preparation requires the shared namespace, combined supervisor,
+explicit UID/GID 1000, an approved immutable agent/recipe/supervisor image set, image-volume
+support for the recipe, and one exclusive RWO PVC. Initial binding supports running
+agent workloads, not assistant runtimes, stopped initial workloads or restart
+generations. Secret-binding identifiers must use lower-case ASCII letters,
+digits and hyphens; locale-sensitive identifier collation is not advertised.
+The inert held init container, not a running supervisor, is the
+warming boundary. Bind retains the real Sandbox CR/Pod/PVC UIDs and reserved
+workload UUID and initializes persistence before the main container starts.
+
+An indeterminate one-shot CREATE is durably quarantined: no recreation, reuse or
+false retirement is allowed until the original creation can be settled. Resource
+receipts, gate tests and source-built native fixtures are not approved-artifact
+or customer readiness proof. Keep customer allocation disabled until real
+maintained artifacts and the customer create/open journey have been verified.
+Reserved claims remain protected from another ordinary writer even if the
+operator removes the prewarm configuration.
+The pool remains outside OpenShell. Ordinary cold lifecycle is unchanged.
+
+This is not support for the existing staging sidecar profile. Its operator-owned
+process bootstrap must remain after binding, both supervisors need an ordered
+release, and pod `fsGroup` changes Secret projection permissions in a way that
+conflicts with the private mode-`0400` grant. A reviewed private-grant transport
+and retained-resource sidecar proof are prerequisites, not permission to switch
+topology or relax isolation. The legacy agent launch contract also does not
+establish current assistant compatibility or a product allocator. Assistant
+schema version 2 is reserved for the incompatible no-recipe contract and returns
+`UNIMPLEMENTED` before identity, resource or tenant mutation.
+
 ## Configure a Compute Driver
 
 Configure the compute driver on the gateway. Current releases accept one driver per gateway. Set `compute_drivers` in the gateway TOML file:

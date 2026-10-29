@@ -782,6 +782,7 @@ impl ProcessHandle {
         // supervisor credentials from its inherited environment.
         strip_supervisor_only_env(&mut cmd);
 
+        inject_provider_env(&mut cmd, &configured_user_environment());
         inject_provider_env(&mut cmd, provider_env);
         apply_canonical_process_environment(
             &mut cmd,
@@ -978,6 +979,7 @@ impl ProcessHandle {
         // inherited environment.
         strip_supervisor_only_env(&mut cmd);
 
+        inject_provider_env(&mut cmd, &configured_user_environment());
         inject_provider_env(&mut cmd, provider_env);
         apply_canonical_process_environment(
             &mut cmd,

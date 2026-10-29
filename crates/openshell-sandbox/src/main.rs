@@ -520,6 +520,35 @@ fn main() -> Result<()> {
     // sandbox flags. Kubernetes init containers invoke this path to seed an
     // emptyDir volume that the agent container then executes from.
     let raw_args: Vec<String> = std::env::args().collect();
+    #[cfg(target_os = "linux")]
+    if raw_args.get(1).map(String::as_str) == Some(openshell_sandbox::binding_workspace::SUBCOMMAND)
+    {
+        if raw_args.len() != 2 {
+            return Err(miette::miette!(
+                "bound workspace initializer takes no arguments"
+            ));
+        }
+        return openshell_sandbox::binding_workspace::run();
+    }
+    #[cfg(target_os = "linux")]
+    if raw_args.get(1).map(String::as_str) == Some(openshell_sandbox::binding_gate::SUBCOMMAND) {
+        return openshell_sandbox::binding_gate::run(&raw_args[2..]);
+    }
+    #[cfg(target_os = "linux")]
+    if matches!(
+        raw_args.get(1).map(String::as_str),
+        Some(
+            openshell_core::prewarm_grant::DELIVER_SUBCOMMAND
+                | openshell_core::prewarm_grant::STATUS_SUBCOMMAND
+        )
+    ) {
+        if raw_args.len() != 2 {
+            return Err(miette::miette!("private grant helper takes no arguments"));
+        }
+        return openshell_core::prewarm_grant::run_helper(
+            raw_args[1] == openshell_core::prewarm_grant::STATUS_SUBCOMMAND,
+        );
+    }
     if raw_args.get(1).map(String::as_str) == Some(COPY_SELF_SUBCOMMAND) {
         let dest = raw_args.get(2).ok_or_else(|| {
             miette::miette!("usage: openshell-sandbox {COPY_SELF_SUBCOMMAND} <DEST>")

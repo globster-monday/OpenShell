@@ -26,6 +26,41 @@ service OpenShell {
     };
   }
 
+  // Reserved native single-use slot operations. These require platform
+  // authorization, not a sandbox identity or tenant workspace membership.
+  // Unsupported drivers/artifacts return UNIMPLEMENTED, never readiness evidence.
+  rpc PreparePrewarmSlot(PrewarmSlotRequest) returns (PrewarmSlotResponse) {
+    option (openshell.options.v1.authorization) = {
+      auth_mode: "bearer"
+      scope: "sandbox:write"
+      global_role: "platform_admin"
+    };
+  }
+
+  rpc ObservePrewarmSlot(PrewarmSlotRequest) returns (PrewarmSlotResponse) {
+    option (openshell.options.v1.authorization) = {
+      auth_mode: "bearer"
+      scope: "sandbox:read"
+      global_role: "platform_admin"
+    };
+  }
+
+  rpc BindPrewarmSlot(PrewarmSlotRequest) returns (PrewarmSlotResponse) {
+    option (openshell.options.v1.authorization) = {
+      auth_mode: "bearer"
+      scope: "sandbox:write"
+      global_role: "platform_admin"
+    };
+  }
+
+  rpc RetirePrewarmSlot(PrewarmSlotRequest) returns (PrewarmSlotResponse) {
+    option (openshell.options.v1.authorization) = {
+      auth_mode: "bearer"
+      scope: "sandbox:write"
+      global_role: "platform_admin"
+    };
+  }
+
   // Return the authenticated caller identity established by the gateway.
   rpc GetCurrentUser(GetCurrentUserRequest) returns (GetCurrentUserResponse) {
     option (openshell.options.v1.authorization) = {
@@ -2881,4 +2916,16 @@ message ExtensionServiceCredential {
   string token = 2 [(openshell.options.v1.secret) = true];
   // Absolute expiry of the token, milliseconds since the epoch.
   int64 expires_at_ms = 3;
+}
+
+// UTF-8 JSON native prewarm v1 request, limited to 1 MiB by the handler.
+// Bind includes tenant credentials and must never be logged.
+message PrewarmSlotRequest {
+  string request_json = 1 [(openshell.options.v1.secret) = true];
+}
+
+// UTF-8 JSON native prewarm v1 evidence, limited to 1 MiB.
+// Unsupported providers return UNIMPLEMENTED instead of this message.
+message PrewarmSlotResponse {
+  string evidence_json = 1;
 }

@@ -53,6 +53,34 @@ pub struct TestOpenShell;
 
 #[tonic::async_trait]
 impl OpenShell for TestOpenShell {
+    async fn prepare_prewarm_slot(
+        &self,
+        _request: tonic::Request<openshell_core::proto::PrewarmSlotRequest>,
+    ) -> Result<Response<openshell_core::proto::PrewarmSlotResponse>, Status> {
+        Err(Status::unimplemented("unused"))
+    }
+
+    async fn observe_prewarm_slot(
+        &self,
+        _request: tonic::Request<openshell_core::proto::PrewarmSlotRequest>,
+    ) -> Result<Response<openshell_core::proto::PrewarmSlotResponse>, Status> {
+        Err(Status::unimplemented("unused"))
+    }
+
+    async fn bind_prewarm_slot(
+        &self,
+        _request: tonic::Request<openshell_core::proto::PrewarmSlotRequest>,
+    ) -> Result<Response<openshell_core::proto::PrewarmSlotResponse>, Status> {
+        Err(Status::unimplemented("unused"))
+    }
+
+    async fn retire_prewarm_slot(
+        &self,
+        _request: tonic::Request<openshell_core::proto::PrewarmSlotRequest>,
+    ) -> Result<Response<openshell_core::proto::PrewarmSlotResponse>, Status> {
+        Err(Status::unimplemented("unused"))
+    }
+
     async fn report_main_process_exit(
         &self,
         _request: tonic::Request<openshell_core::proto::ReportMainProcessExitRequest>,
