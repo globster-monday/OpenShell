@@ -14,10 +14,10 @@ jobs:
   check-task-id:
     runs-on: ubuntu-latest
     steps:
-      # Only trusted base code runs with the task-sync credential.
+      # pull_request_target pins github.sha to trusted default-branch code.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
           sparse-checkout: scripts/check_task_id.py
           sparse-checkout-cone-mode: false

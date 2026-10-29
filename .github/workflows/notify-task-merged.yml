@@ -18,10 +18,10 @@ jobs:
     if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     steps:
-      # Only the reviewed main-branch merge is trusted with the app credential.
+      # Never select privileged executable code from PR payload fields.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
           sparse-checkout: scripts/check_task_id.py
           sparse-checkout-cone-mode: false
