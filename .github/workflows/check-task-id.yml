@@ -7,13 +7,35 @@ on:
   pull_request_target:
     types: [opened, edited, synchronize, reopened]
 
+permissions:
+  contents: read
+
 jobs:
   check-task-id:
     runs-on: ubuntu-latest
     steps:
-      - uses: globster-monday/workspace/.github/actions/check-task-id@main
+      # Only trusted base code runs with the task-sync credential.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          pr-author: ${{ github.event.pull_request.user.login }}
-          pr-body: ${{ github.event.pull_request.body }}
-          app-id: ${{ secrets.TASK_SYNC_APP_ID }}
-          app-private-key: ${{ secrets.TASK_SYNC_APP_PRIVATE_KEY }}
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+          sparse-checkout: scripts/check_task_id.py
+          sparse-checkout-cone-mode: false
+      - name: Parse PR task metadata
+        id: task
+        run: python3 scripts/check_task_id.py parse
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: workspace
+        if: steps.task.outputs.task_id != 'none'
+        with:
+          client-id: ${{ secrets.TASK_SYNC_APP_ID }}
+          private-key: ${{ secrets.TASK_SYNC_APP_PRIVATE_KEY }}
+          owner: globster-monday
+          repositories: workspace
+          permission-contents: read
+      - name: Verify Workspace task
+        if: steps.task.outputs.task_id != 'none'
+        env:
+          TASK_ID: ${{ steps.task.outputs.task_id }}
+          GITHUB_TOKEN: ${{ steps.workspace.outputs.token }}
+        run: python3 scripts/check_task_id.py verify

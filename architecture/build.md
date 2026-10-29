@@ -269,6 +269,14 @@ the release tag.
 
 Required checks run on GitHub Actions. Workflows that use NVIDIA self-hosted runners trigger from copy-pr-bot mirror branches, so trusted PRs are mirrored into `pull-request/<N>` branches before those workflows run. `main` also uses GitHub merge queue so the final queued integration commit is validated before it merges.
 
+The Globster fork's task-ID gate executes its validator from the immutable PR
+base commit, never the PR head. A Workspace-scoped GitHub App token reads task
+metadata through the API; the public fork does not download private executable
+code. Non-task and bot exceptions do not request that token.
+The merged-task notification uses reviewed main-branch merge code and a separate
+Workspace-scoped dispatch token. Workspace remains responsible for verifying
+the merged PR and updating task state.
+
 The high-level CI model:
 
 1. PR-context gate jobs publish required statuses for the PR head commit.
