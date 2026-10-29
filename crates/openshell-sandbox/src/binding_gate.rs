@@ -186,9 +186,11 @@ pub fn run(arguments: &[String]) -> Result<()> {
         binding_workspace::verify_prepared_blank(&serde_json::json!({
             "slotId":args.slot_id,"generation":args.generation,"podUid":args.pod_uid,"sandboxId":args.sandbox_id,
         }))?;
+        // Log only the slot tuple; the Pod UID and sandbox identity are part of
+        // the grant binding material and stay out of container logs.
         eprintln!(
-            "OpenShell held-init ready slot={} generation={} pod={} sandbox={}",
-            args.slot_id, args.generation, args.pod_uid, args.sandbox_id
+            "OpenShell held-init ready slot={} generation={}",
+            args.slot_id, args.generation
         );
     }
     eprintln!("Waiting for committed workload binding");

@@ -306,10 +306,9 @@ async fn retained_prewarm_resources_and_cross_replica_fences() {
         error.to_string().contains("reserved native prewarm claim"),
         "removing prewarm configuration disabled reserved-claim protection"
     );
-    println!(
-        "NATIVE_RESOURCE_BIND_PROOF workload={} receipt={} initialized=true retained=true customerReady=false",
-        input["workloadId"], receipt
-    );
+    // Proof markers carry outcomes only; resource receipts are asserted above and
+    // are never written to the test log.
+    println!("NATIVE_RESOURCE_BIND_PROOF initialized=true retained=true customerReady=false");
 
     let unused = prepare(&config);
     let prepared = retry(&first, Operation::Prepare, &unused).await;
@@ -344,10 +343,7 @@ async fn retained_prewarm_resources_and_cross_replica_fences() {
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
     assert!(call(&first, Operation::Prepare, &unused).await.is_err());
-    println!(
-        "NATIVE_RESOURCE_RETIRE_PROOF workload={} receipt={} computeAbsent=true storageAbsent=true",
-        unused["workloadId"], unused_receipt
-    );
+    println!("NATIVE_RESOURCE_RETIRE_PROOF computeAbsent=true storageAbsent=true");
 
     let uncertain = prepare(&config);
     let driver = first.compute.prewarm_driver.as_ref().unwrap();
